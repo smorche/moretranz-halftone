@@ -5,6 +5,7 @@ import { z } from "zod";
 import sharp from "sharp";
 import { S3Client, PutObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import sharp from "sharp";
 
 const app = express();
 app.use(express.json({ limit: "2mb" }));
@@ -63,6 +64,81 @@ app.post("/v1/halftone/upload-url", async (req, res) => {
     return res.status(400).json({
       error: { code: "BAD_REQUEST", message: "Invalid request", details: parsed.error.flatten() }
     });
+const ProcessRequest = z.object({
+  key: z.string().min(1),
+  maxWidth: z.number().int().min(64).max(5000).default(2000),
+  cellSize: z.number().int().min(2).max(80).default(12)
+});
+
+async function streamToBuffer(stream) {
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  return Buffer.concat(chunks);
+}
+
+app.post("/v1/halftone/process", async (req, res) => {
+  try {
+    const parsed = ProcessRequest.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({
+        error: { code: "BAD_REQUEST", message: "Invalid request", details: parsed.error.flatten() }
+      });
+    }
+
+    const { key, maxWidth, cellSize } = parsed.data;
+
+    const getCmd = new GetObjectCommand({
+      Bucket: process.env.R2_BUCKET,
+      Key: key
+    });
+
+    const obj = await s3.send(getCmd);
+    if (!obj.Body) {
+      return res.status(404).json({ error: { code: "NOT_FOUND", message: "Object body is empty" } });
+    }
+
+    const inputBuffer = await streamToBuffer(obj.Body);
+
+    const outputBuffer = await sharp(inputBuffer)
+      .rotate()
+      .resize({ width: maxWidth, withoutEnlargement: true })
+      .png()
+      .toBuffer();
+
+    const outKey = key
+      .replace(/^uploads\//, "outputs/")
+      .replace(/\.[a-zA-Z0-9]+$/, ".png");
+
+    const putCmd = new PutObjectCommand({
+      Bucket: process.env.R2_BUCKET,
+      Key: outKey,
+      Body: outputBuffer,
+      ContentType: "image/png"
+    });
+
+    await s3.send(putCmd);
+
+    const downloadCmd = new GetObjectCommand({
+      Bucket: process.env.R2_BUCKET,
+      Key: outKey
+    });
+
+    const downloadUrl = await getSignedUrl(s3, downloadCmd, { expiresIn: 600 });
+
+    res.json({
+      ok: true,
+      inputKey: key,
+      outputKey: outKey,
+      downloadUrl,
+      settings: { maxWidth, cellSize }
+    });
+  } catch (err) {
+    console.error("PROCESS_ERROR:", err);
+    res.status(500).json({
+      error: { code: "INTERNAL", message: "Processing failed" }
+    });
+  }
+});
   }
 
   const { filename, contentType } = parsed.data;

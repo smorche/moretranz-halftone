@@ -10,11 +10,7 @@ app.use(express.json({ limit: "2mb" }));
 
 app.use(
   cors({
-    origin: [
-      "https://moretranz.com",
-      "https://www.moretranz.com",
-      "http://localhost:3000"
-    ],
+    origin: true, // allow all origins (safe for now)
     methods: ["GET", "POST", "OPTIONS"],
     allowedHeaders: ["Content-Type"]
   })

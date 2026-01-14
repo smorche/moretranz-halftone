@@ -56,11 +56,10 @@ app.post("/v1/halftone/upload-url", async (req, res) => {
   const key = `uploads/${imageId}/${safeName}`;
 
   const cmd = new PutObjectCommand({
-    Bucket: process.env.R2_BUCKET,
-    Key: key,
-    ContentType: contentType,
-    ContentLength: contentLength
-  });
+  Bucket: process.env.R2_BUCKET,
+  Key: key,
+  ContentType: contentType
+});
 
   const uploadUrl = await getSignedUrl(s3, cmd, { expiresIn: 600 });
 

@@ -3,39 +3,25 @@ import express from "express";
 import cors from "cors";
 import { z } from "zod";
 import sharp from "sharp";
-import {
-  S3Client,
-  PutObjectCommand,
-  GetObjectCommand
-} from "@aws-sdk/client-s3";
+import { S3Client, PutObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
 const app = express();
+app.use(express.json({ limit: "2mb" }));
 
-/**
- * NOTE:
- * - Requests to /upload-url and /process are small JSON; keep limit low.
- * - The actual image data is uploaded directly to R2 via a presigned URL.
- */
-app.use(express.json({ limit: "1mb" }));
-
+// CORS (broad for now)
 app.use(
   cors({
-    origin: true, // allow all origins (safe for now); tighten later to your Shopify domain(s)
+    origin: true,
     methods: ["GET", "POST", "OPTIONS"],
     allowedHeaders: ["Content-Type"]
   })
 );
 
-// --- Required env vars ---
-const requiredEnv = [
-  "R2_ENDPOINT",
-  "R2_BUCKET",
-  "R2_REGION",
-  "R2_ACCESS_KEY_ID",
-  "R2_SECRET_ACCESS_KEY"
-];
+// Explicit OPTIONS handler (helps with some proxies)
+app.options("*", cors());
 
+const requiredEnv = ["R2_ENDPOINT", "R2_BUCKET", "R2_REGION", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY"];
 for (const k of requiredEnv) {
   if (!process.env[k]) {
     console.error(`Missing required env var: ${k}`);
@@ -44,7 +30,7 @@ for (const k of requiredEnv) {
 }
 
 const s3 = new S3Client({
-  region: process.env.R2_REGION, // usually "auto" for Cloudflare R2
+  region: process.env.R2_REGION, // typically "auto" for R2
   endpoint: process.env.R2_ENDPOINT,
   credentials: {
     accessKeyId: process.env.R2_ACCESS_KEY_ID,
@@ -52,17 +38,90 @@ const s3 = new S3Client({
   }
 });
 
-// --- Basic routes ---
-app.get("/", (_req, res) => {
-  res
-    .status(200)
-    .type("text/plain")
-    .send("MoreTranz Halftone API is running. Try GET /health");
-});
-
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
-// --- Upload URL (presigned PUT) ---
+// ------------------------------
+// Helpers
+// ------------------------------
+async function streamToBuffer(body) {
+  if (!body) return Buffer.alloc(0);
+
+  // In Node 18+, AWS SDK v3 Body is usually a readable stream
+  if (Buffer.isBuffer(body)) return body;
+
+  const chunks = [];
+  for await (const chunk of body) chunks.push(Buffer.from(chunk));
+  return Buffer.concat(chunks);
+}
+
+function clamp01(x) {
+  return x < 0 ? 0 : x > 1 ? 1 : x;
+}
+
+function safeKey(key) {
+  // Prevent path traversal-like weirdness and keep it in a bucket namespace
+  // Allow slashes but remove leading slash and collapse ".."
+  return key.replace(/^\/+/, "").replace(/\.\./g, "_");
+}
+
+// Draw a dot (circle or ellipse) into an RGBA buffer with alpha blending
+function drawDotRGBA(out, width, height, cx, cy, rx, ry, r, g, b, a) {
+  if (rx <= 0 || ry <= 0 || a <= 0) return;
+
+  const x0 = Math.max(0, Math.floor(cx - rx));
+  const x1 = Math.min(width - 1, Math.ceil(cx + rx));
+  const y0 = Math.max(0, Math.floor(cy - ry));
+  const y1 = Math.min(height - 1, Math.ceil(cy + ry));
+
+  const invRx2 = 1 / (rx * rx);
+  const invRy2 = 1 / (ry * ry);
+
+  // alpha in 0..255
+  const srcA = a;
+
+  for (let y = y0; y <= y1; y++) {
+    const dy = y - cy;
+    const dy2 = dy * dy;
+
+    for (let x = x0; x <= x1; x++) {
+      const dx = x - cx;
+      const inside = (dx * dx) * invRx2 + dy2 * invRy2 <= 1;
+      if (!inside) continue;
+
+      const idx = (y * width + x) * 4;
+      const dstR = out[idx];
+      const dstG = out[idx + 1];
+      const dstB = out[idx + 2];
+      const dstA = out[idx + 3];
+
+      // Source-over alpha blend
+      const sA = srcA / 255;
+      const dA = dstA / 255;
+      const outA = sA + dA * (1 - sA);
+
+      if (outA <= 0) {
+        out[idx] = 0;
+        out[idx + 1] = 0;
+        out[idx + 2] = 0;
+        out[idx + 3] = 0;
+        continue;
+      }
+
+      const outR = (r * sA + dstR * dA * (1 - sA)) / outA;
+      const outG = (g * sA + dstG * dA * (1 - sA)) / outA;
+      const outB = (b * sA + dstB * dA * (1 - sA)) / outA;
+
+      out[idx] = Math.round(outR);
+      out[idx + 1] = Math.round(outG);
+      out[idx + 2] = Math.round(outB);
+      out[idx + 3] = Math.round(outA * 255);
+    }
+  }
+}
+
+// ------------------------------
+// Upload URL
+// ------------------------------
 const UploadUrlRequest = z.object({
   filename: z.string().min(1),
   contentType: z.enum(["image/png", "image/jpeg", "image/webp"]),
@@ -70,287 +129,225 @@ const UploadUrlRequest = z.object({
 });
 
 app.post("/v1/halftone/upload-url", async (req, res) => {
-  try {
-    const parsed = UploadUrlRequest.safeParse(req.body);
-    if (!parsed.success) {
-      return res.status(400).json({
-        error: {
-          code: "BAD_REQUEST",
-          message: "Invalid request",
-          details: parsed.error.flatten()
-        }
-      });
-    }
-
-    const { filename, contentType } = parsed.data;
-
-    const safeName = filename.replace(/[^a-zA-Z0-9._-]/g, "_");
-    const imageId = `img_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
-    const key = `uploads/${imageId}/${safeName}`;
-
-    // IMPORTANT for R2 presigned PUT:
-    // Keep SignedHeaders minimal. We'll only require Content-Type.
-    const cmd = new PutObjectCommand({
-      Bucket: process.env.R2_BUCKET,
-      Key: key,
-      ContentType: contentType
-    });
-
-    const uploadUrl = await getSignedUrl(s3, cmd, { expiresIn: 600 });
-
-    return res.json({
-      imageId,
-      key,
-      uploadUrl,
-      headers: { "Content-Type": contentType },
-      maxBytes: 25 * 1024 * 1024
-    });
-  } catch (err) {
-    console.error("upload-url error:", err);
-    return res.status(500).json({
-      error: { code: "INTERNAL", message: "Failed to create upload URL" }
+  const parsed = UploadUrlRequest.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({
+      error: { code: "BAD_REQUEST", message: "Invalid request", details: parsed.error.flatten() }
     });
   }
+
+  const { filename, contentType } = parsed.data;
+
+  const safeName = filename.replace(/[^a-zA-Z0-9._-]/g, "_");
+  const imageId = `img_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
+  const key = `uploads/${imageId}/${safeName}`;
+
+  // IMPORTANT: do NOT include ContentLength in the signed headers
+  // (R2/S3 presign can fail if the browser doesn't send exact content-length)
+  const cmd = new PutObjectCommand({
+    Bucket: process.env.R2_BUCKET,
+    Key: key,
+    ContentType: contentType
+  });
+
+  const uploadUrl = await getSignedUrl(s3, cmd, { expiresIn: 600 });
+
+  res.json({
+    imageId,
+    key,
+    uploadUrl,
+    headers: { "Content-Type": contentType },
+    maxBytes: 25 * 1024 * 1024
+  });
 });
 
-// --- Download URL (presigned GET) ---
-const DownloadUrlRequest = z.object({
-  key: z.string().min(1)
-});
+// ------------------------------
+// Download URL
+// ------------------------------
+const DownloadUrlRequest = z.object({ key: z.string().min(1) });
 
 app.post("/v1/halftone/download-url", async (req, res) => {
-  try {
-    const parsed = DownloadUrlRequest.safeParse(req.body);
-    if (!parsed.success) {
-      return res.status(400).json({
-        error: {
-          code: "BAD_REQUEST",
-          message: "Invalid request",
-          details: parsed.error.flatten()
-        }
-      });
-    }
-
-    const cmd = new GetObjectCommand({
-      Bucket: process.env.R2_BUCKET,
-      Key: parsed.data.key
-    });
-
-    const downloadUrl = await getSignedUrl(s3, cmd, { expiresIn: 600 });
-    return res.json({ downloadUrl });
-  } catch (err) {
-    console.error("download-url error:", err);
-    return res.status(500).json({
-      error: { code: "INTERNAL", message: "Failed to create download URL" }
+  const parsed = DownloadUrlRequest.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({
+      error: { code: "BAD_REQUEST", message: "Invalid request", details: parsed.error.flatten() }
     });
   }
+
+  const cmd = new GetObjectCommand({
+    Bucket: process.env.R2_BUCKET,
+    Key: safeKey(parsed.data.key)
+  });
+
+  const downloadUrl = await getSignedUrl(s3, cmd, { expiresIn: 600 });
+  res.json({ downloadUrl });
 });
 
-// --- Helpers ---
-async function streamToBuffer(body) {
-  // AWS SDK v3 GetObject Body can be a stream in Node
-  const chunks = [];
-  for await (const chunk of body) chunks.push(chunk);
-  return Buffer.concat(chunks);
-}
-
-function clamp(n, min, max) {
-  return Math.max(min, Math.min(max, n));
-}
-
-/**
- * Full-color halftone:
- * - Sample the image on a grid (cellSize)
- * - For each cell, compute average RGB and luminance
- * - Use luminance to control dot size (darker -> bigger)
- * - Render dots on a transparent background via SVG -> PNG
- */
-async function makeHalftonePng({
-  inputBuffer,
-  cellSize,
-  maxWidth,
-  dotShape
-}) {
-  const img = sharp(inputBuffer, { failOn: "none" });
-
-  // Normalize orientation and convert to RGB
-  // (RGB-only mode per your requirement)
-  const metadata = await img.metadata();
-  const inW = metadata.width || 0;
-  const inH = metadata.height || 0;
-  if (!inW || !inH) {
-    throw new Error("Unable to read input image dimensions");
-  }
-
-  // Resize down if needed (keeps cost predictable)
-  const targetW = maxWidth && inW > maxWidth ? maxWidth : inW;
-
-  const resized = img
-    .rotate()
-    .resize({ width: targetW, withoutEnlargement: true })
-    .removeAlpha() // ensure we work in RGB; output will be transparent anyway
-    .toColourspace("rgb");
-
-  const { data, info } = await resized
-    .raw()
-    .toBuffer({ resolveWithObject: true });
-
-  const width = info.width;
-  const height = info.height;
-  const channels = info.channels; // should be 3 (RGB)
-  if (channels < 3) {
-    throw new Error(`Unexpected channel count: ${channels}`);
-  }
-
-  const cs = clamp(cellSize, 4, 64);
-  const rMax = cs * 0.5;
-
-  // Build SVG dots (transparent background)
-  // For large images, SVG can get big; we cap maxWidth and cellSize range.
-  let svg = `<?xml version="1.0" encoding="UTF-8"?>\n`;
-  svg += `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`;
-
-  for (let y = 0; y < height; y += cs) {
-    for (let x = 0; x < width; x += cs) {
-      // Compute average color within this cell
-      const xEnd = Math.min(x + cs, width);
-      const yEnd = Math.min(y + cs, height);
-
-      let rSum = 0,
-        gSum = 0,
-        bSum = 0,
-        count = 0;
-
-      for (let yy = y; yy < yEnd; yy++) {
-        for (let xx = x; xx < xEnd; xx++) {
-          const idx = (yy * width + xx) * channels;
-          rSum += data[idx];
-          gSum += data[idx + 1];
-          bSum += data[idx + 2];
-          count++;
-        }
-      }
-
-      if (count === 0) continue;
-
-      const r = Math.round(rSum / count);
-      const g = Math.round(gSum / count);
-      const b = Math.round(bSum / count);
-
-      // Relative luminance (sRGB approximation)
-      // 0 = black, 255 = white
-      const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-
-      // Dot size: darker -> larger
-      // Scale lum (0..255) into radius (rMax..0)
-      const t = 1 - lum / 255; // 1=dark, 0=light
-      const radius = rMax * t;
-
-      // Skip near-white dots to reduce SVG size
-      if (radius < 0.35) continue;
-
-      const cx = x + cs / 2;
-      const cy = y + cs / 2;
-      const fill = `rgb(${r},${g},${b})`;
-
-      if (dotShape === "square") {
-        const size = radius * 2;
-        const sx = cx - size / 2;
-        const sy = cy - size / 2;
-        svg += `<rect x="${sx.toFixed(2)}" y="${sy.toFixed(2)}" width="${size.toFixed(
-          2
-        )}" height="${size.toFixed(2)}" fill="${fill}" />`;
-      } else if (dotShape === "ellipse") {
-        // Slightly stretched ellipse for a different look
-        const rx = radius;
-        const ry = radius * 0.75;
-        svg += `<ellipse cx="${cx.toFixed(2)}" cy="${cy.toFixed(
-          2
-        )}" rx="${rx.toFixed(2)}" ry="${ry.toFixed(
-          2
-        )}" fill="${fill}" />`;
-      } else {
-        // circle (default)
-        svg += `<circle cx="${cx.toFixed(2)}" cy="${cy.toFixed(
-          2
-        )}" r="${radius.toFixed(2)}" fill="${fill}" />`;
-      }
-    }
-  }
-
-  svg += `</svg>`;
-
-  // Render SVG -> PNG with transparent background
-  const outPng = await sharp(Buffer.from(svg))
-    .png() // transparent output
-    .toBuffer();
-
-  return { outPng, width, height };
-}
-
-// --- Process endpoint (server-side processing) ---
+// ------------------------------
+// Halftone Process
+// ------------------------------
 const ProcessRequest = z.object({
   key: z.string().min(1),
-
-  // Halftone controls
-  cellSize: z.number().int().min(4).max(64).default(12),
-  maxWidth: z.number().int().min(200).max(4000).default(2000),
-  dotShape: z.enum(["circle", "square", "ellipse"]).default("circle")
+  cellSize: z.number().int().min(4).max(80).default(12),
+  maxWidth: z.number().int().min(256).max(4000).default(2000),
+  dotShape: z.enum(["circle", "ellipse"]).default("circle")
 });
 
 app.post("/v1/halftone/process", async (req, res) => {
+  const parsed = ProcessRequest.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({
+      error: { code: "BAD_REQUEST", message: "Invalid request", details: parsed.error.flatten() }
+    });
+  }
+
+  const { key, cellSize, maxWidth, dotShape } = parsed.data;
+
+  console.log("PROCESS PARAMS:", { key, cellSize, maxWidth, dotShape });
+
   try {
-    const parsed = ProcessRequest.safeParse(req.body);
-    if (!parsed.success) {
-      return res.status(400).json({
-        error: {
-          code: "BAD_REQUEST",
-          message: "Invalid request",
-          details: parsed.error.flatten()
-        }
-      });
-    }
-
-    const { key, cellSize, maxWidth, dotShape } = parsed.data;
-
     // 1) Download original from R2
     const getCmd = new GetObjectCommand({
       Bucket: process.env.R2_BUCKET,
-      Key: key
+      Key: safeKey(key)
     });
 
     const getResp = await s3.send(getCmd);
-    if (!getResp.Body) {
-      return res.status(404).json({
-        error: { code: "NOT_FOUND", message: "Source image not found" }
+    const inputBuffer = await streamToBuffer(getResp.Body);
+
+    if (!inputBuffer || inputBuffer.length === 0) {
+      return res.status(400).json({
+        error: { code: "BAD_REQUEST", message: "Input file is empty or not found" }
       });
     }
 
-    const inputBuffer = await streamToBuffer(getResp.Body);
+    // 2) Decode + resize + force RGBA + get raw pixels
+    const { data: rgba, info } = await sharp(inputBuffer)
+      .rotate() // respect EXIF orientation
+      .resize({ width: maxWidth, withoutEnlargement: true })
+      .ensureAlpha() // REQUIRED for transparency-safe pipeline
+      .raw()
+      .toBuffer({ resolveWithObject: true });
 
-    // 2) Generate halftone PNG (transparent)
-    const { outPng, width, height } = await makeHalftonePng({
-      inputBuffer,
-      cellSize,
-      maxWidth,
-      dotShape
-    });
+    console.log("IMAGE INFO:", info);
 
-    // 3) Upload result to R2 (server-side, no CORS issues)
-    const outKey = key
-      .replace(/^uploads\//, "outputs/")
-      .replace(/\.[a-zA-Z0-9]+$/, "") + `_halftone_${dotShape}_c${cellSize}.png`;
+    const width = info.width;
+    const height = info.height;
+    const channels = info.channels;
+
+    if (channels !== 4) {
+      // ensureAlpha() should guarantee 4
+      throw new Error(`Expected 4 channels (RGBA) but got ${channels}`);
+    }
+
+    // 3) Create transparent output canvas
+    const out = Buffer.alloc(width * height * 4, 0);
+
+    // 4) Full-color halftone per cell
+    //    - Average color per cell
+    //    - Luminance determines dot size
+    //    - Color uses average RGB
+    //    - Output remains transparent outside dots
+    const cellsX = Math.ceil(width / cellSize);
+    const cellsY = Math.ceil(height / cellSize);
+
+    for (let cy = 0; cy < cellsY; cy++) {
+      for (let cx = 0; cx < cellsX; cx++) {
+        const xStart = cx * cellSize;
+        const yStart = cy * cellSize;
+        const xEnd = Math.min(width, xStart + cellSize);
+        const yEnd = Math.min(height, yStart + cellSize);
+
+        let rSum = 0,
+          gSum = 0,
+          bSum = 0,
+          aSum = 0,
+          count = 0;
+
+        for (let y = yStart; y < yEnd; y++) {
+          for (let x = xStart; x < xEnd; x++) {
+            const idx = (y * width + x) * 4;
+            const a = rgba[idx + 3];
+            // Include all pixels, but alpha-weight the color
+            rSum += rgba[idx] * a;
+            gSum += rgba[idx + 1] * a;
+            bSum += rgba[idx + 2] * a;
+            aSum += a;
+            count++;
+          }
+        }
+
+        if (count === 0) continue;
+
+        const avgA = aSum / count; // 0..255 (not normalized)
+        if (avgA <= 1) continue; // mostly transparent cell -> skip
+
+        // Alpha-weighted average RGB
+        const denom = aSum || 1;
+        const avgR = rSum / denom;
+        const avgG = gSum / denom;
+        const avgB = bSum / denom;
+
+        // Luminance (0..1), using sRGB coefficients
+        const lum = clamp01((0.2126 * avgR + 0.7152 * avgG + 0.0722 * avgB) / 255);
+
+        // Darker -> bigger dot
+        const radiusMax = (cellSize / 2) * 0.98;
+        const radius = radiusMax * (1 - lum);
+
+        // Dot alpha: keep based on cell alpha (so transparent inputs stay transparent)
+        const dotAlpha = Math.round(clamp01(avgA / 255) * 255);
+
+        const centerX = xStart + (xEnd - xStart) / 2;
+        const centerY = yStart + (yEnd - yStart) / 2;
+
+        let rx = radius;
+        let ry = radius;
+
+        // Slightly elliptical option (more “printy” look)
+        if (dotShape === "ellipse") {
+          rx = radius * 1.15;
+          ry = radius * 0.85;
+        }
+
+        // Skip tiny dots (speeds up)
+        if (rx < 0.35 || ry < 0.35) continue;
+
+        drawDotRGBA(
+          out,
+          width,
+          height,
+          centerX,
+          centerY,
+          rx,
+          ry,
+          avgR,
+          avgG,
+          avgB,
+          dotAlpha
+        );
+      }
+    }
+
+    // 5) Encode to transparent PNG
+    const outputPng = await sharp(out, { raw: { width, height, channels: 4 } })
+      .png({ compressionLevel: 9 })
+      .toBuffer();
+
+    // 6) Upload output to R2
+    const outId = `ht_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
+    const outKey = `outputs/${outId}.png`;
 
     const putCmd = new PutObjectCommand({
       Bucket: process.env.R2_BUCKET,
       Key: outKey,
-      Body: outPng,
+      Body: outputPng,
       ContentType: "image/png"
     });
 
     await s3.send(putCmd);
 
-    // 4) Return presigned download URL
+    // 7) Provide a download URL (presigned)
     const dlCmd = new GetObjectCommand({
       Bucket: process.env.R2_BUCKET,
       Key: outKey
@@ -358,26 +355,22 @@ app.post("/v1/halftone/process", async (req, res) => {
 
     const downloadUrl = await getSignedUrl(s3, dlCmd, { expiresIn: 600 });
 
-    return res.json({
+    res.json({
+      ok: true,
+      inputKey: key,
       outputKey: outKey,
       downloadUrl,
-      meta: {
-        width,
-        height,
-        cellSize,
-        dotShape,
-        transparent: true,
-        mode: "RGB"
-      }
+      format: "png",
+      transparent: true,
+      params: { cellSize, maxWidth, dotShape }
     });
   } catch (err) {
-    console.error("process error:", err);
-    return res.status(500).json({
+    console.error("HALFTONE ERROR:", err);
+    res.status(500).json({
       error: { code: "INTERNAL", message: "Failed to process halftone" }
     });
   }
 });
 
-// --- Start server ---
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log(`API listening on port ${port}`));

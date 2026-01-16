@@ -1,31 +1,41 @@
-// server.js
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import { z } from "zod";
 import sharp from "sharp";
-import { S3Client, PutObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
+import {
+  S3Client,
+  PutObjectCommand,
+  GetObjectCommand
+} from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
 const app = express();
 
-// Parse JSON bodies (your API only; uploads go direct-to-R2)
-app.use(express.json({ limit: "2mb" }));
+/**
+ * NOTE:
+ * - Requests to /upload-url and /process are small JSON; keep limit low.
+ * - The actual image data is uploaded directly to R2 via a presigned URL.
+ */
+app.use(express.json({ limit: "1mb" }));
 
-// CORS for your API (NOT for R2). This allows browsers to call your API from any site.
 app.use(
   cors({
-    origin: true,
+    origin: true, // allow all origins (safe for now); tighten later to your Shopify domain(s)
     methods: ["GET", "POST", "OPTIONS"],
     allowedHeaders: ["Content-Type"]
   })
 );
 
-// Respond to preflight requests
-app.options("*", cors());
+// --- Required env vars ---
+const requiredEnv = [
+  "R2_ENDPOINT",
+  "R2_BUCKET",
+  "R2_REGION",
+  "R2_ACCESS_KEY_ID",
+  "R2_SECRET_ACCESS_KEY"
+];
 
-// --- Env validation ---
-const requiredEnv = ["R2_ENDPOINT", "R2_BUCKET", "R2_REGION", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY"];
 for (const k of requiredEnv) {
   if (!process.env[k]) {
     console.error(`Missing required env var: ${k}`);
@@ -33,73 +43,53 @@ for (const k of requiredEnv) {
   }
 }
 
-// --- Cloudflare R2 (S3 compatible) client ---
 const s3 = new S3Client({
-  region: process.env.R2_REGION, // usually "auto" for R2
-  endpoint: process.env.R2_ENDPOINT, // e.g. https://<accountid>.r2.cloudflarestorage.com
+  region: process.env.R2_REGION, // usually "auto" for Cloudflare R2
+  endpoint: process.env.R2_ENDPOINT,
   credentials: {
     accessKeyId: process.env.R2_ACCESS_KEY_ID,
     secretAccessKey: process.env.R2_SECRET_ACCESS_KEY
   }
 });
 
-// --- Utility: stream -> Buffer (GetObject returns a stream body) ---
-function streamToBuffer(stream) {
-  return new Promise((resolve, reject) => {
-    const chunks = [];
-    stream.on("data", (chunk) => chunks.push(chunk));
-    stream.on("end", () => resolve(Buffer.concat(chunks)));
-    stream.on("error", reject);
-  });
-}
-
 // --- Basic routes ---
 app.get("/", (_req, res) => {
-  res.type("text").send("MoreTranz Halftone API is running. Try GET /health");
+  res
+    .status(200)
+    .type("text/plain")
+    .send("MoreTranz Halftone API is running. Try GET /health");
 });
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
-// --- Request schemas ---
+// --- Upload URL (presigned PUT) ---
 const UploadUrlRequest = z.object({
   filename: z.string().min(1),
   contentType: z.enum(["image/png", "image/jpeg", "image/webp"]),
-  // This is the size of the file you will PUT to the presigned URL
   contentLength: z.number().int().positive().max(25 * 1024 * 1024)
 });
 
-const DownloadUrlRequest = z.object({
-  key: z.string().min(1)
-});
-
-const ProcessRequest = z.object({
-  // R2 object key returned from upload-url step
-  key: z.string().min(1),
-  // Processing controls (starter pipeline)
-  maxWidth: z.number().int().positive().max(4000).default(2000),
-  outputType: z.enum(["image/png", "image/jpeg", "image/webp"]).default("image/png")
-});
-
-// --- 1) Generate an upload URL (client will PUT file directly to R2) ---
 app.post("/v1/halftone/upload-url", async (req, res) => {
-  const parsed = UploadUrlRequest.safeParse(req.body);
-  if (!parsed.success) {
-    return res.status(400).json({
-      error: { code: "BAD_REQUEST", message: "Invalid request", details: parsed.error.flatten() }
-    });
-  }
-
-  const { filename, contentType } = parsed.data;
-
-  // Sanitize filename for object key safety
-  const safeName = filename.replace(/[^a-zA-Z0-9._-]/g, "_");
-  const imageId = `img_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
-  const key = `uploads/${imageId}/${safeName}`;
-
   try {
-    // NOTE: We do NOT include ContentLength in the signed request,
-    // because browsers can trigger preflight or send different headers.
-    // R2 will still store the content you PUT.
+    const parsed = UploadUrlRequest.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({
+        error: {
+          code: "BAD_REQUEST",
+          message: "Invalid request",
+          details: parsed.error.flatten()
+        }
+      });
+    }
+
+    const { filename, contentType } = parsed.data;
+
+    const safeName = filename.replace(/[^a-zA-Z0-9._-]/g, "_");
+    const imageId = `img_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
+    const key = `uploads/${imageId}/${safeName}`;
+
+    // IMPORTANT for R2 presigned PUT:
+    // Keep SignedHeaders minimal. We'll only require Content-Type.
     const cmd = new PutObjectCommand({
       Bucket: process.env.R2_BUCKET,
       Key: key,
@@ -116,23 +106,31 @@ app.post("/v1/halftone/upload-url", async (req, res) => {
       maxBytes: 25 * 1024 * 1024
     });
   } catch (err) {
-    console.error("UPLOAD-URL ERROR:", err);
+    console.error("upload-url error:", err);
     return res.status(500).json({
       error: { code: "INTERNAL", message: "Failed to create upload URL" }
     });
   }
 });
 
-// --- 2) Generate a download URL for an existing R2 object ---
-app.post("/v1/halftone/download-url", async (req, res) => {
-  const parsed = DownloadUrlRequest.safeParse(req.body);
-  if (!parsed.success) {
-    return res.status(400).json({
-      error: { code: "BAD_REQUEST", message: "Invalid request", details: parsed.error.flatten() }
-    });
-  }
+// --- Download URL (presigned GET) ---
+const DownloadUrlRequest = z.object({
+  key: z.string().min(1)
+});
 
+app.post("/v1/halftone/download-url", async (req, res) => {
   try {
+    const parsed = DownloadUrlRequest.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({
+        error: {
+          code: "BAD_REQUEST",
+          message: "Invalid request",
+          details: parsed.error.flatten()
+        }
+      });
+    }
+
     const cmd = new GetObjectCommand({
       Bucket: process.env.R2_BUCKET,
       Key: parsed.data.key
@@ -141,85 +139,241 @@ app.post("/v1/halftone/download-url", async (req, res) => {
     const downloadUrl = await getSignedUrl(s3, cmd, { expiresIn: 600 });
     return res.json({ downloadUrl });
   } catch (err) {
-    console.error("DOWNLOAD-URL ERROR:", err);
+    console.error("download-url error:", err);
     return res.status(500).json({
       error: { code: "INTERNAL", message: "Failed to create download URL" }
     });
   }
 });
 
-// --- 3) Process an uploaded image (download from R2 -> sharp -> write to R2) ---
-app.post("/v1/halftone/process", async (req, res) => {
-  const parsed = ProcessRequest.safeParse(req.body);
-  if (!parsed.success) {
-    return res.status(400).json({
-      error: { code: "BAD_REQUEST", message: "Invalid request", details: parsed.error.flatten() }
-    });
+// --- Helpers ---
+async function streamToBuffer(body) {
+  // AWS SDK v3 GetObject Body can be a stream in Node
+  const chunks = [];
+  for await (const chunk of body) chunks.push(chunk);
+  return Buffer.concat(chunks);
+}
+
+function clamp(n, min, max) {
+  return Math.max(min, Math.min(max, n));
+}
+
+/**
+ * Full-color halftone:
+ * - Sample the image on a grid (cellSize)
+ * - For each cell, compute average RGB and luminance
+ * - Use luminance to control dot size (darker -> bigger)
+ * - Render dots on a transparent background via SVG -> PNG
+ */
+async function makeHalftonePng({
+  inputBuffer,
+  cellSize,
+  maxWidth,
+  dotShape
+}) {
+  const img = sharp(inputBuffer, { failOn: "none" });
+
+  // Normalize orientation and convert to RGB
+  // (RGB-only mode per your requirement)
+  const metadata = await img.metadata();
+  const inW = metadata.width || 0;
+  const inH = metadata.height || 0;
+  if (!inW || !inH) {
+    throw new Error("Unable to read input image dimensions");
   }
 
-  const { key, maxWidth, outputType } = parsed.data;
+  // Resize down if needed (keeps cost predictable)
+  const targetW = maxWidth && inW > maxWidth ? maxWidth : inW;
 
+  const resized = img
+    .rotate()
+    .resize({ width: targetW, withoutEnlargement: true })
+    .removeAlpha() // ensure we work in RGB; output will be transparent anyway
+    .toColourspace("rgb");
+
+  const { data, info } = await resized
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+
+  const width = info.width;
+  const height = info.height;
+  const channels = info.channels; // should be 3 (RGB)
+  if (channels < 3) {
+    throw new Error(`Unexpected channel count: ${channels}`);
+  }
+
+  const cs = clamp(cellSize, 4, 64);
+  const rMax = cs * 0.5;
+
+  // Build SVG dots (transparent background)
+  // For large images, SVG can get big; we cap maxWidth and cellSize range.
+  let svg = `<?xml version="1.0" encoding="UTF-8"?>\n`;
+  svg += `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`;
+
+  for (let y = 0; y < height; y += cs) {
+    for (let x = 0; x < width; x += cs) {
+      // Compute average color within this cell
+      const xEnd = Math.min(x + cs, width);
+      const yEnd = Math.min(y + cs, height);
+
+      let rSum = 0,
+        gSum = 0,
+        bSum = 0,
+        count = 0;
+
+      for (let yy = y; yy < yEnd; yy++) {
+        for (let xx = x; xx < xEnd; xx++) {
+          const idx = (yy * width + xx) * channels;
+          rSum += data[idx];
+          gSum += data[idx + 1];
+          bSum += data[idx + 2];
+          count++;
+        }
+      }
+
+      if (count === 0) continue;
+
+      const r = Math.round(rSum / count);
+      const g = Math.round(gSum / count);
+      const b = Math.round(bSum / count);
+
+      // Relative luminance (sRGB approximation)
+      // 0 = black, 255 = white
+      const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+
+      // Dot size: darker -> larger
+      // Scale lum (0..255) into radius (rMax..0)
+      const t = 1 - lum / 255; // 1=dark, 0=light
+      const radius = rMax * t;
+
+      // Skip near-white dots to reduce SVG size
+      if (radius < 0.35) continue;
+
+      const cx = x + cs / 2;
+      const cy = y + cs / 2;
+      const fill = `rgb(${r},${g},${b})`;
+
+      if (dotShape === "square") {
+        const size = radius * 2;
+        const sx = cx - size / 2;
+        const sy = cy - size / 2;
+        svg += `<rect x="${sx.toFixed(2)}" y="${sy.toFixed(2)}" width="${size.toFixed(
+          2
+        )}" height="${size.toFixed(2)}" fill="${fill}" />`;
+      } else if (dotShape === "ellipse") {
+        // Slightly stretched ellipse for a different look
+        const rx = radius;
+        const ry = radius * 0.75;
+        svg += `<ellipse cx="${cx.toFixed(2)}" cy="${cy.toFixed(
+          2
+        )}" rx="${rx.toFixed(2)}" ry="${ry.toFixed(
+          2
+        )}" fill="${fill}" />`;
+      } else {
+        // circle (default)
+        svg += `<circle cx="${cx.toFixed(2)}" cy="${cy.toFixed(
+          2
+        )}" r="${radius.toFixed(2)}" fill="${fill}" />`;
+      }
+    }
+  }
+
+  svg += `</svg>`;
+
+  // Render SVG -> PNG with transparent background
+  const outPng = await sharp(Buffer.from(svg))
+    .png() // transparent output
+    .toBuffer();
+
+  return { outPng, width, height };
+}
+
+// --- Process endpoint (server-side processing) ---
+const ProcessRequest = z.object({
+  key: z.string().min(1),
+
+  // Halftone controls
+  cellSize: z.number().int().min(4).max(64).default(12),
+  maxWidth: z.number().int().min(200).max(4000).default(2000),
+  dotShape: z.enum(["circle", "square", "ellipse"]).default("circle")
+});
+
+app.post("/v1/halftone/process", async (req, res) => {
   try {
-    // (a) Download original from R2
+    const parsed = ProcessRequest.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({
+        error: {
+          code: "BAD_REQUEST",
+          message: "Invalid request",
+          details: parsed.error.flatten()
+        }
+      });
+    }
+
+    const { key, cellSize, maxWidth, dotShape } = parsed.data;
+
+    // 1) Download original from R2
     const getCmd = new GetObjectCommand({
       Bucket: process.env.R2_BUCKET,
       Key: key
     });
 
-    const obj = await s3.send(getCmd);
-
-    if (!obj?.Body) {
+    const getResp = await s3.send(getCmd);
+    if (!getResp.Body) {
       return res.status(404).json({
-        error: { code: "NOT_FOUND", message: "Object not found or empty" }
+        error: { code: "NOT_FOUND", message: "Source image not found" }
       });
     }
 
-    const inputBuffer = await streamToBuffer(obj.Body);
+    const inputBuffer = await streamToBuffer(getResp.Body);
 
-    // (b) Starter processing pipeline (NOT final halftone algorithm)
-    const format = outputType === "image/jpeg" ? "jpeg" : outputType === "image/webp" ? "webp" : "png";
-    const processedBuffer = await sharp(inputBuffer)
-      .rotate() // honor EXIF orientation
-      .resize({ width: maxWidth, withoutEnlargement: true })
-      .grayscale()
-      .normalise()
-      .toFormat(format)
-      .toBuffer();
+    // 2) Generate halftone PNG (transparent)
+    const { outPng, width, height } = await makeHalftonePng({
+      inputBuffer,
+      cellSize,
+      maxWidth,
+      dotShape
+    });
 
-    // (c) Save processed result back to R2
-    const ext = format === "jpeg" ? "jpg" : format;
-    const processedKey = key
-      .replace(/^uploads\//, "processed/")
-      .replace(/\.[^.]+$/, `.${ext}`);
+    // 3) Upload result to R2 (server-side, no CORS issues)
+    const outKey = key
+      .replace(/^uploads\//, "outputs/")
+      .replace(/\.[a-zA-Z0-9]+$/, "") + `_halftone_${dotShape}_c${cellSize}.png`;
 
     const putCmd = new PutObjectCommand({
       Bucket: process.env.R2_BUCKET,
-      Key: processedKey,
-      Body: processedBuffer,
-      ContentType: outputType
+      Key: outKey,
+      Body: outPng,
+      ContentType: "image/png"
     });
 
     await s3.send(putCmd);
 
-    // (d) Return a signed download URL for the processed file
+    // 4) Return presigned download URL
     const dlCmd = new GetObjectCommand({
       Bucket: process.env.R2_BUCKET,
-      Key: processedKey
+      Key: outKey
     });
 
     const downloadUrl = await getSignedUrl(s3, dlCmd, { expiresIn: 600 });
 
     return res.json({
-      ok: true,
-      inputKey: key,
-      processedKey,
+      outputKey: outKey,
       downloadUrl,
-      bytes: processedBuffer.length
+      meta: {
+        width,
+        height,
+        cellSize,
+        dotShape,
+        transparent: true,
+        mode: "RGB"
+      }
     });
   } catch (err) {
-    console.error("PROCESS ERROR:", err);
+    console.error("process error:", err);
     return res.status(500).json({
-      error: { code: "INTERNAL", message: "Processing failed" }
+      error: { code: "INTERNAL", message: "Failed to process halftone" }
     });
   }
 });

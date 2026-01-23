@@ -45,24 +45,26 @@ function parseCorsOrigins(val) {
     .filter(Boolean);
 }
 
-const CORS_ORIGINS = parseCorsOrigins(process.env.CORS_ORIGINS);
+const ALLOWED_ORIGINS = new Set([
+  "https://moretranz-halftone.pages.dev",
+  "https://moretranz.com",
+  "https://www.moretranz.com",
+]);
 
 app.use(
   cors({
     origin: (origin, cb) => {
-      // Allow non-browser tools (no Origin header)
+      // allow server-to-server / curl / Postman (no Origin header)
       if (!origin) return cb(null, true);
 
-      if (CORS_ORIGINS === "*") return cb(null, true);
+      if (ALLOWED_ORIGINS.has(origin)) return cb(null, true);
 
-      if (Array.isArray(CORS_ORIGINS) && CORS_ORIGINS.includes(origin)) {
-        return cb(null, true);
-      }
-
+      // reject everything else
       return cb(new Error(`CORS blocked for origin: ${origin}`));
     },
     methods: ["GET", "POST", "OPTIONS"],
-    allowedHeaders: ["Content-Type"]
+    allowedHeaders: ["Content-Type"],
+    optionsSuccessStatus: 204,
   })
 );
 

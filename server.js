@@ -9,7 +9,6 @@ import {
   PutObjectCommand,
   GetObjectCommand,
   HeadObjectCommand,
-  PutObjectAclCommand
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
@@ -24,7 +23,7 @@ const requiredEnv = [
   "R2_BUCKET",
   "R2_REGION",
   "R2_ACCESS_KEY_ID",
-  "R2_SECRET_ACCESS_KEY"
+  "R2_SECRET_ACCESS_KEY",
 ];
 for (const k of requiredEnv) {
   if (!process.env[k]) {
@@ -36,15 +35,7 @@ for (const k of requiredEnv) {
 const MAX_UPLOAD_BYTES = Number(process.env.MAX_UPLOAD_BYTES || 25 * 1024 * 1024); // 25MB default
 const MAX_IMAGE_PIXELS = Number(process.env.MAX_IMAGE_PIXELS || 50_000_000); // 50MP default
 
-function parseCorsOrigins(val) {
-  if (!val || val.trim() === "" || val.trim() === "*") return "*";
-  // Comma-separated list of allowed origins
-  return val
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
-}
-
+// Cloudflare Pages URL + your domains
 const ALLOWED_ORIGINS = new Set([
   "https://moretranz-halftone.pages.dev",
   "https://moretranz.com",
@@ -59,7 +50,6 @@ app.use(
 
       if (ALLOWED_ORIGINS.has(origin)) return cb(null, true);
 
-      // reject everything else
       return cb(new Error(`CORS blocked for origin: ${origin}`));
     },
     methods: ["GET", "POST", "OPTIONS"],
@@ -76,8 +66,8 @@ const s3 = new S3Client({
   endpoint: process.env.R2_ENDPOINT,
   credentials: {
     accessKeyId: process.env.R2_ACCESS_KEY_ID,
-    secretAccessKey: process.env.R2_SECRET_ACCESS_KEY
-  }
+    secretAccessKey: process.env.R2_SECRET_ACCESS_KEY,
+  },
 });
 
 /** ---------------------------
@@ -109,35 +99,57 @@ function clamp(n, min, max) {
   return Math.max(min, Math.min(max, n));
 }
 
-function escapeXml(s) {
-  return String(s)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&apos;");
-}
-
 function luminance255(r, g, b) {
-  // standard relative luminance approximation
   return 0.2126 * r + 0.7152 * g + 0.0722 * b;
 }
 
 /**
- * Full-color halftone:
- * - sample average color in each cell
- * - dot color = sampled RGB
- * - dot radius = based on luminance (darker => larger dot)
- * - preserve alpha; output is transparent PNG
+ * Find bounding box of non-transparent pixels (alpha > threshold).
+ * Returns null if nothing non-transparent exists.
+ */
+function findAlphaBBoxRGBA(rgba, w, h, alphaThreshold = 5) {
+  let minX = w,
+    minY = h,
+    maxX = -1,
+    maxY = -1;
+
+  for (let y = 0; y < h; y++) {
+    const rowStart = y * w * 4;
+    for (let x = 0; x < w; x++) {
+      const a = rgba[rowStart + x * 4 + 3];
+      if (a > alphaThreshold) {
+        if (x < minX) minX = x;
+        if (y < minY) minY = y;
+        if (x > maxX) maxX = x;
+        if (y > maxY) maxY = y;
+      }
+    }
+  }
+
+  if (maxX < 0 || maxY < 0) return null;
+
+  return {
+    left: minX,
+    top: minY,
+    width: maxX - minX + 1,
+    height: maxY - minY + 1,
+  };
+}
+
+/**
+ * Full-color halftone that PRESERVES transparency and CROPS to the design shape.
+ *
+ * Key fix for your “rectangle output” complaint:
+ *  - We first resize to maxWidth
+ *  - Then we auto-crop to the non-transparent alpha bbox (with small padding)
+ *  - Then we generate halftone dots only within that cropped canvas
  */
 async function makeColorHalftonePng(inputBuffer, { cellSize, maxWidth, dotShape }) {
   // Decode & normalize to RGBA
   const base = sharp(inputBuffer, { failOn: "none" });
 
   const meta = await base.metadata();
-  if (!meta.width || !meta.height) {
-    throw new Error("Could not read image dimensions");
-  }
+  if (!meta.width || !meta.height) throw new Error("Could not read image dimensions");
 
   const pixels = meta.width * meta.height;
   if (pixels > MAX_IMAGE_PIXELS) {
@@ -146,15 +158,50 @@ async function makeColorHalftonePng(inputBuffer, { cellSize, maxWidth, dotShape 
 
   // Resize down to maxWidth (keep aspect)
   const targetW = Math.min(meta.width, maxWidth);
-  const resized = base.resize({ width: targetW, withoutEnlargement: true });
+  const resized = base.resize({ width: targetW, withoutEnlargement: true }).ensureAlpha();
 
   const rMeta = await resized.metadata();
-  const w = rMeta.width;
-  const h = rMeta.height;
-  if (!w || !h) throw new Error("Could not read resized dimensions");
+  const w0 = rMeta.width;
+  const h0 = rMeta.height;
+  if (!w0 || !h0) throw new Error("Could not read resized dimensions");
 
-  // Get raw RGBA pixels
-  const { data } = await resized.ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  // Get raw RGBA pixels for bbox detection
+  const raw0 = await resized.raw().toBuffer();
+
+  // Auto-crop to non-transparent bbox (this is what prevents “rectangle output”)
+  const bbox = findAlphaBBoxRGBA(raw0, w0, h0, 5);
+
+  // If the image is fully transparent, just return empty-ish output
+  if (!bbox) {
+    const empty = await sharp({
+      create: {
+        width: 1,
+        height: 1,
+        channels: 4,
+        background: { r: 0, g: 0, b: 0, alpha: 0 },
+      },
+    })
+      .png()
+      .toBuffer();
+    return { png: empty, width: 1, height: 1 };
+  }
+
+  // Add a small padding around the detected design
+  const pad = 2;
+  const left = clamp(bbox.left - pad, 0, w0 - 1);
+  const top = clamp(bbox.top - pad, 0, h0 - 1);
+  const right = clamp(bbox.left + bbox.width - 1 + pad, 0, w0 - 1);
+  const bottom = clamp(bbox.top + bbox.height - 1 + pad, 0, h0 - 1);
+
+  const cropW = right - left + 1;
+  const cropH = bottom - top + 1;
+
+  const cropped = resized.extract({ left, top, width: cropW, height: cropH });
+
+  // Raw RGBA pixels for halftone generation
+  const raw = await cropped.raw().toBuffer();
+  const w = cropW;
+  const h = cropH;
 
   // SVG canvas
   const cs = clamp(Math.floor(cellSize), 4, 80);
@@ -163,8 +210,8 @@ async function makeColorHalftonePng(inputBuffer, { cellSize, maxWidth, dotShape 
   const cols = Math.ceil(w / cs);
   const rows = Math.ceil(h / cs);
 
-  // Build dots
   let shapes = "";
+
   for (let row = 0; row < rows; row++) {
     const y0 = row * cs;
     const y1 = Math.min(y0 + cs, h);
@@ -183,30 +230,29 @@ async function makeColorHalftonePng(inputBuffer, { cellSize, maxWidth, dotShape 
       for (let y = y0; y < y1; y++) {
         for (let x = x0; x < x1; x++) {
           const idx = (y * w + x) * 4;
-          rSum += data[idx];
-          gSum += data[idx + 1];
-          bSum += data[idx + 2];
-          aSum += data[idx + 3];
+          rSum += raw[idx];
+          gSum += raw[idx + 1];
+          bSum += raw[idx + 2];
+          aSum += raw[idx + 3];
           count++;
         }
       }
 
       if (count === 0) continue;
+
+      const a = Math.round(aSum / count);
+      // Skip fully transparent cells
+      if (a <= 0) continue;
+
       const r = Math.round(rSum / count);
       const g = Math.round(gSum / count);
       const b = Math.round(bSum / count);
-      const a = Math.round(aSum / count);
-
-      // Skip fully transparent cells
-      if (a <= 0) continue;
 
       const lum = luminance255(r, g, b); // 0..255
       const darkness = 1 - lum / 255; // 0..1
 
-      // Dot size: scale with darkness; clamp to avoid huge fill
+      // Dot size
       const radius = clamp(half * (0.15 + 0.95 * darkness), 0, half);
-
-      // If dot is nearly invisible, skip
       if (radius < 0.5) continue;
 
       const cx = x0 + (x1 - x0) / 2;
@@ -217,12 +263,11 @@ async function makeColorHalftonePng(inputBuffer, { cellSize, maxWidth, dotShape 
 
       if (dotShape === "square") {
         const size = radius * 2;
-        const rx = 0;
         shapes += `<rect x="${(cx - size / 2).toFixed(2)}" y="${(cy - size / 2).toFixed(
           2
         )}" width="${size.toFixed(2)}" height="${size.toFixed(
           2
-        )}" rx="${rx}" ry="${rx}" fill="${fill}" fill-opacity="${fillOpacity}" />`;
+        )}" fill="${fill}" fill-opacity="${fillOpacity}" />`;
       } else if (dotShape === "ellipse") {
         const rx = radius * 1.2;
         const ry = radius * 0.85;
@@ -230,7 +275,6 @@ async function makeColorHalftonePng(inputBuffer, { cellSize, maxWidth, dotShape 
           2
         )}" ry="${ry.toFixed(2)}" fill="${fill}" fill-opacity="${fillOpacity}" />`;
       } else {
-        // circle default
         shapes += `<circle cx="${cx.toFixed(2)}" cy="${cy.toFixed(2)}" r="${radius.toFixed(
           2
         )}" fill="${fill}" fill-opacity="${fillOpacity}" />`;
@@ -268,7 +312,7 @@ app.get("/health", (_req, res) => res.json({ ok: true }));
 const UploadUrlRequest = z.object({
   filename: z.string().min(1),
   contentType: z.enum(["image/png", "image/jpeg", "image/webp"]),
-  contentLength: z.number().int().positive().max(MAX_UPLOAD_BYTES)
+  contentLength: z.number().int().positive().max(MAX_UPLOAD_BYTES),
 });
 
 app.post("/v1/halftone/upload-url", async (req, res) => {
@@ -277,7 +321,7 @@ app.post("/v1/halftone/upload-url", async (req, res) => {
     if (!parsed.success) {
       return res.status(400).json(
         errJson("BAD_REQUEST", "Invalid request", {
-          issues: parsed.error.flatten()
+          issues: parsed.error.flatten(),
         })
       );
     }
@@ -288,17 +332,14 @@ app.post("/v1/halftone/upload-url", async (req, res) => {
     const imageId = `img_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
     const key = `uploads/${imageId}/${safeName}`;
 
-    // IMPORTANT: do NOT include ContentLength in signed headers
-    // unless the client will send it exactly. Content-Type is enough.
     const cmd = new PutObjectCommand({
       Bucket: process.env.R2_BUCKET,
       Key: key,
-      ContentType: contentType
+      ContentType: contentType,
     });
 
     const uploadUrl = await getSignedUrl(s3, cmd, { expiresIn: 600 });
 
-    // Helpful for debugging
     logWithReq(req, "ISSUED UPLOAD URL", { key, contentType, contentLength });
 
     return res.json({
@@ -306,7 +347,7 @@ app.post("/v1/halftone/upload-url", async (req, res) => {
       key,
       uploadUrl,
       headers: { "Content-Type": contentType },
-      maxBytes: MAX_UPLOAD_BYTES
+      maxBytes: MAX_UPLOAD_BYTES,
     });
   } catch (e) {
     console.error(`[${req._rid}] upload-url error`, e);
@@ -322,14 +363,14 @@ app.post("/v1/halftone/download-url", async (req, res) => {
     if (!parsed.success) {
       return res.status(400).json(
         errJson("BAD_REQUEST", "Invalid request", {
-          issues: parsed.error.flatten()
+          issues: parsed.error.flatten(),
         })
       );
     }
 
     const cmd = new GetObjectCommand({
       Bucket: process.env.R2_BUCKET,
-      Key: parsed.data.key
+      Key: parsed.data.key,
     });
 
     const downloadUrl = await getSignedUrl(s3, cmd, { expiresIn: 600 });
@@ -340,11 +381,14 @@ app.post("/v1/halftone/download-url", async (req, res) => {
   }
 });
 
+/**
+ * 12" @ 300 DPI = 3600 px max processing width
+ */
 const ProcessRequest = z.object({
   key: z.string().min(1),
   cellSize: z.number().int().min(4).max(80).default(12),
-  maxWidth: z.number().int().min(256).max(4000).default(2000),
-  dotShape: z.enum(["circle", "square", "ellipse"]).default("circle")
+  maxWidth: z.number().int().min(256).max(3600).default(2000),
+  dotShape: z.enum(["circle", "square", "ellipse"]).default("circle"),
 });
 
 app.post("/v1/halftone/process", async (req, res) => {
@@ -352,7 +396,7 @@ app.post("/v1/halftone/process", async (req, res) => {
   if (!parsed.success) {
     return res.status(400).json(
       errJson("BAD_REQUEST", "Invalid request", {
-        issues: parsed.error.flatten()
+        issues: parsed.error.flatten(),
       })
     );
   }
@@ -367,7 +411,7 @@ app.post("/v1/halftone/process", async (req, res) => {
       const head = await s3.send(
         new HeadObjectCommand({
           Bucket: process.env.R2_BUCKET,
-          Key: key
+          Key: key,
         })
       );
 
@@ -377,8 +421,6 @@ app.post("/v1/halftone/process", async (req, res) => {
           .json(errJson("TOO_LARGE", `File exceeds max upload size (${MAX_UPLOAD_BYTES} bytes)`));
       }
     } catch (e) {
-      // HeadObject might be disabled or object may not exist
-      // We'll handle not found in GetObject.
       logWithReq(req, "HeadObject warning:", String(e?.name || e));
     }
 
@@ -386,7 +428,7 @@ app.post("/v1/halftone/process", async (req, res) => {
     const obj = await s3.send(
       new GetObjectCommand({
         Bucket: process.env.R2_BUCKET,
-        Key: key
+        Key: key,
       })
     );
 
@@ -406,7 +448,6 @@ app.post("/v1/halftone/process", async (req, res) => {
     }
 
     // 3) Validate that Sharp can read it (format check)
-    // If the upload was not a real image (or wrong bytes), this throws.
     let meta;
     try {
       meta = await sharp(inputBuffer, { failOn: "none" }).metadata();
@@ -418,7 +459,7 @@ app.post("/v1/halftone/process", async (req, res) => {
     if (!meta.format || !["png", "jpeg", "webp"].includes(meta.format)) {
       return res.status(400).json(
         errJson("BAD_IMAGE", "Unsupported image format (only PNG, JPG, WEBP)", {
-          format: meta.format || null
+          format: meta.format || null,
         })
       );
     }
@@ -433,16 +474,16 @@ app.post("/v1/halftone/process", async (req, res) => {
         errJson("TOO_LARGE", `Image resolution too large (${totalPixels} pixels)`, {
           width: meta.width,
           height: meta.height,
-          maxPixels: MAX_IMAGE_PIXELS
+          maxPixels: MAX_IMAGE_PIXELS,
         })
       );
     }
 
-    // 4) Generate halftone PNG (transparent)
+    // 4) Generate halftone PNG (transparent + cropped to alpha shape)
     const { png, width, height } = await makeColorHalftonePng(inputBuffer, {
       cellSize,
       maxWidth,
-      dotShape
+      dotShape,
     });
 
     // 5) Store output in R2
@@ -454,16 +495,16 @@ app.post("/v1/halftone/process", async (req, res) => {
         Bucket: process.env.R2_BUCKET,
         Key: outputKey,
         Body: png,
-        ContentType: "image/png"
+        ContentType: "image/png",
       })
     );
 
-    // 6) Provide a signed download URL for output
+    // 6) Signed download URL for output
     const downloadUrl = await getSignedUrl(
       s3,
       new GetObjectCommand({
         Bucket: process.env.R2_BUCKET,
-        Key: outputKey
+        Key: outputKey,
       }),
       { expiresIn: 600 }
     );
@@ -477,7 +518,7 @@ app.post("/v1/halftone/process", async (req, res) => {
       format: "png",
       transparent: true,
       params: { cellSize, maxWidth, dotShape },
-      downloadUrl
+      downloadUrl,
     });
   } catch (e) {
     console.error(`[${req._rid}] HALFTONE ERROR:`, e);

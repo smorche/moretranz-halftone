@@ -7,15 +7,30 @@
     <style>
       body { font-family: Arial, sans-serif; max-width: 1120px; margin: 24px auto; padding: 0 16px; }
 
-      /* Two-column layout: left grows, right stays a fixed column */
-      .row {
-        display: flex;
+      /* Desktop: 2 columns (settings left, preview right) */
+      .layout {
+        display: grid;
+        grid-template-columns: minmax(360px, 1fr) 460px;
         gap: 16px;
-        align-items: flex-start;
-        justify-content: center;
+        align-items: start;
+      }
+
+      /* Mobile: stack */
+      @media (max-width: 980px) {
+        .layout { grid-template-columns: 1fr; }
       }
 
       .card { border: 1px solid #ddd; border-radius: 12px; padding: 16px; background: #fff; }
+
+      /* Keep preview column from getting huge and keep it visible on scroll */
+      .previewCol {
+        position: sticky;
+        top: 16px;
+      }
+      @media (max-width: 980px) {
+        .previewCol { position: static; }
+      }
+
       label { display:block; font-size: 14px; margin: 12px 0 6px; font-weight: 600; }
       input[type="range"] { width: 100%; }
       select, input[type="file"], input[type="text"], button { width: 100%; padding: 10px; font-size: 14px; box-sizing: border-box; }
@@ -25,47 +40,38 @@
       .ok { color: #0a7a0a; }
       .err { color: #b00020; white-space: pre-wrap; }
       .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; font-size: 12px; }
+
       .pill { display:inline-block; padding: 3px 8px; border: 1px solid #ddd; border-radius: 999px; font-size: 12px; color:#333; background:#fafafa; }
+
       .btnRow { display:flex; gap:10px; }
       .btnRow button { width: 100%; }
 
-      .toggleRow {
-        display:flex; align-items:center; justify-content:space-between; gap:12px;
-        padding:10px 12px; border:1px solid #eee; border-radius:10px; background:#fafafa;
-      }
+      .toggleRow { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:10px 12px; border:1px solid #eee; border-radius:10px; background:#fafafa; }
       .toggleRow input { width:auto; transform: scale(1.15); }
 
       details { margin-top: 12px; }
       details > summary { cursor: pointer; font-weight: 600; }
+
       .grid2 { display:grid; grid-template-columns: 1fr 1fr; gap:12px; }
+      @media (max-width: 720px) { .grid2 { grid-template-columns: 1fr; } }
 
-      /* Left column: flexible */
-      .leftCol { flex: 1 1 520px; min-width: 360px; }
-
-      /* Right column: fixed width, doesn't stretch full screen */
-      .rightCol { flex: 0 0 480px; max-width: 480px; }
-
-      /* Previews: stacked, constrained */
-      .previewImg {
-        width: 100%;
-        max-width: 100%;
-        max-height: 420px;
-        height: auto;
-        display: block;
+      /* Preview images: keep within preview column and avoid giant height */
+      .imgBox {
         border: 1px solid #eee;
         border-radius: 10px;
         background: repeating-conic-gradient(#f6f6f6 0% 25%, #ffffff 0% 50%) 50% / 16px 16px;
+        padding: 8px;
+      }
+      img {
+        display:block;
+        width: 100%;
+        height: auto;
+        max-height: 360px;
         object-fit: contain;
+        border-radius: 8px;
       }
-
-      /* Responsive: stack columns on small screens */
       @media (max-width: 980px) {
-        .row { flex-wrap: wrap; }
-        .rightCol { flex: 1 1 520px; max-width: none; }
-      }
-
-      @media (max-width: 720px) {
-        .grid2 { grid-template-columns: 1fr; }
+        img { max-height: 420px; }
       }
     </style>
   </head>
@@ -77,8 +83,8 @@
       <span class="pill">DTF-safe output (binary alpha)</span>
     </p>
 
-    <div class="row">
-      <div class="card leftCol">
+    <div class="layout">
+      <div class="card">
         <h3 style="margin-top:0;">1) Choose image</h3>
         <input id="file" type="file" accept="image/png,image/jpeg,image/webp" />
         <div id="fileInfo" class="muted" style="margin-top:6px;"></div>
@@ -105,7 +111,7 @@
         <div class="toggleRow" style="margin-top:14px;">
           <div>
             <div style="font-weight:700;">DTF Safe Mode</div>
-            <div class="muted">Binary alpha + thresholds to prevent unwanted white underbase.</div>
+            <div class="muted">Kills faint pixels that cause unwanted white underbase.</div>
           </div>
           <input id="dtfSafe" type="checkbox" checked />
         </div>
@@ -123,21 +129,20 @@
           </div>
         </div>
 
-        <details>
+        <details id="advanced">
           <summary>Advanced (DTF thresholds)</summary>
 
           <div class="grid2" style="margin-top:10px;">
             <div>
-              <label>Alpha threshold: <span id="alphaThresholdVal">32</span></label>
-              <!-- min=1 so alpha=0 never counts -->
-              <input id="alphaThreshold" type="range" min="1" max="200" step="1" value="32" />
-              <div class="muted">Ignore pixels with alpha ≤ threshold. Increase to reduce halos.</div>
+              <label>Alpha threshold: <span id="alphaThresholdVal">48</span></label>
+              <input id="alphaThreshold" type="range" min="1" max="200" step="1" value="48" />
+              <div class="muted">Higher = fewer dots in “empty” areas (kills alpha noise).</div>
             </div>
 
             <div>
-              <label>Min coverage: <span id="minCoverageVal">0.15</span></label>
-              <input id="minCoverage" type="range" min="0.00" max="0.60" step="0.01" value="0.15" />
-              <div class="muted">Cell must have this % of solid pixels to emit a dot.</div>
+              <label>Min coverage: <span id="minCoverageVal">0.20</span></label>
+              <input id="minCoverage" type="range" min="0.00" max="0.60" step="0.01" value="0.20" />
+              <div class="muted">A cell must have this % of solid pixels to emit a dot.</div>
             </div>
           </div>
 
@@ -160,21 +165,25 @@
         <div id="debug" class="mono muted" style="margin-top:10px;"></div>
       </div>
 
-      <div class="card rightCol">
+      <div class="card previewCol">
         <h3 style="margin-top:0;">Preview</h3>
 
         <div class="muted">Original</div>
-        <img id="origPreview" class="previewImg" alt="" />
+        <div class="imgBox">
+          <img id="origPreview" alt="" />
+        </div>
 
-        <div style="height:10px;"></div>
+        <div style="height:12px;"></div>
 
         <div class="muted">Halftone output</div>
-        <img id="outPreview" class="previewImg" alt="" />
+        <div class="imgBox">
+          <img id="outPreview" alt="" />
+        </div>
 
         <button id="download" style="margin-top:12px;" disabled>Download PNG</button>
 
         <div class="muted" style="margin-top:10px;">
-          If you see dots outside the artwork: increase Alpha threshold (try 40–60).
+          If you see dots outside the artwork: raise <b>Alpha threshold</b> (try 60–90) or raise <b>Min coverage</b>.
         </div>
       </div>
     </div>
@@ -220,8 +229,8 @@
         dtfSafe: true,
         dotGain: 1.25,
         minDot: 0.18,
-        alphaThreshold: 32,
-        minCoverage: 0.15,
+        alphaThreshold: 48,
+        minCoverage: 0.20,
         alphaMode: "binary",
       };
 
@@ -232,76 +241,20 @@
       alphaThreshold.addEventListener("input", () => (alphaThresholdVal.textContent = alphaThreshold.value));
       minCoverage.addEventListener("input", () => (minCoverageVal.textContent = Number(minCoverage.value).toFixed(2)));
 
-      function applyDtfSafeUiState() {
-        if (dtfSafe.checked) {
-          alphaMode.value = "binary";
-          if (Number(alphaThreshold.value) < 1) {
-            alphaThreshold.value = 1;
-            alphaThresholdVal.textContent = "1";
-          }
-        }
-      }
-      dtfSafe.addEventListener("change", applyDtfSafeUiState);
-
-      let lastDownloadUrl = null;
-
-      resetBtn.addEventListener("click", () => {
-        dotShape.value = DEFAULTS.dotShape;
-        cellSize.value = DEFAULTS.cellSize;
-        maxWidth.value = DEFAULTS.maxWidth;
-        apiBase.value = DEFAULTS.apiBase;
-
-        dtfSafe.checked = DEFAULTS.dtfSafe;
-        dotGain.value = DEFAULTS.dotGain;
-        minDot.value = DEFAULTS.minDot;
-        alphaThreshold.value = DEFAULTS.alphaThreshold;
-        minCoverage.value = DEFAULTS.minCoverage;
-        alphaMode.value = DEFAULTS.alphaMode;
-
-        cellSizeVal.textContent = DEFAULTS.cellSize;
-        maxWidthVal.textContent = DEFAULTS.maxWidth;
-        dotGainVal.textContent = DEFAULTS.dotGain;
-        minDotVal.textContent = DEFAULTS.minDot;
-        alphaThresholdVal.textContent = DEFAULTS.alphaThreshold;
-        minCoverageVal.textContent = Number(DEFAULTS.minCoverage).toFixed(2);
-
-        applyDtfSafeUiState();
-        setStatus("");
-        setDebug("");
-      });
-
-      fileEl.addEventListener("change", () => {
-        const f = fileEl.files?.[0];
-        if (!f) return;
-
-        fileInfo.textContent = `${f.name} — ${f.type || "unknown"} — ${f.size.toLocaleString()} bytes`;
-        origPreview.src = URL.createObjectURL(f);
-
-        outPreview.removeAttribute("src");
-        dlBtn.disabled = true;
-        lastDownloadUrl = null;
-
-        setStatus("");
-        setDebug("");
-      });
-
       function setStatus(msg, kind="") {
         statusEl.className = kind === "err" ? "err" : (kind === "ok" ? "ok" : "");
         statusEl.textContent = msg;
       }
+      function setDebug(msg) { debugEl.textContent = msg; }
 
-      function setDebug(msg) {
-        debugEl.textContent = msg;
+      function normalizeBaseUrl(raw) {
+        return String(raw || "").trim().replace(/\/+$/, "");
       }
 
       async function jsonOrText(resp) {
         const ct = resp.headers.get("content-type") || "";
         if (ct.includes("application/json")) return resp.json();
         return resp.text();
-      }
-
-      function normalizeBaseUrl(raw) {
-        return String(raw || "").trim().replace(/\/+$/, "");
       }
 
       function friendlyNetworkError(err) {
@@ -330,6 +283,47 @@
         throw lastErr;
       }
 
+      let lastDownloadUrl = null;
+
+      fileEl.addEventListener("change", () => {
+        const f = fileEl.files?.[0];
+        if (!f) return;
+
+        fileInfo.textContent = `${f.name} — ${f.type || "unknown"} — ${f.size.toLocaleString()} bytes`;
+        origPreview.src = URL.createObjectURL(f);
+
+        outPreview.removeAttribute("src");
+        dlBtn.disabled = true;
+        lastDownloadUrl = null;
+
+        setStatus("");
+        setDebug("");
+      });
+
+      resetBtn.addEventListener("click", () => {
+        dotShape.value = DEFAULTS.dotShape;
+        cellSize.value = DEFAULTS.cellSize;
+        maxWidth.value = DEFAULTS.maxWidth;
+        apiBase.value = DEFAULTS.apiBase;
+
+        dtfSafe.checked = DEFAULTS.dtfSafe;
+        dotGain.value = DEFAULTS.dotGain;
+        minDot.value = DEFAULTS.minDot;
+        alphaThreshold.value = DEFAULTS.alphaThreshold;
+        minCoverage.value = DEFAULTS.minCoverage;
+        alphaMode.value = DEFAULTS.alphaMode;
+
+        cellSizeVal.textContent = DEFAULTS.cellSize;
+        maxWidthVal.textContent = DEFAULTS.maxWidth;
+        dotGainVal.textContent = DEFAULTS.dotGain;
+        minDotVal.textContent = DEFAULTS.minDot;
+        alphaThresholdVal.textContent = DEFAULTS.alphaThreshold;
+        minCoverageVal.textContent = Number(DEFAULTS.minCoverage).toFixed(2);
+
+        setStatus("");
+        setDebug("");
+      });
+
       goBtn.addEventListener("click", async () => {
         const f = fileEl.files?.[0];
         if (!f) return setStatus("Please choose an image first.", "err");
@@ -350,6 +344,7 @@
         dlBtn.disabled = true;
 
         try {
+          // 1) upload url
           const upResp = await fetchWithRetry(`${base}/v1/halftone/upload-url`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -364,9 +359,9 @@
             const body = await jsonOrText(upResp);
             throw new Error(`upload-url failed (${upResp.status}): ${JSON.stringify(body, null, 2)}`);
           }
-
           const up = await upResp.json();
 
+          // 2) PUT to R2
           const putResp = await fetchWithRetry(up.uploadUrl, {
             method: "PUT",
             headers: up.headers || { "Content-Type": f.type },
@@ -377,6 +372,9 @@
             const txt = await putResp.text().catch(() => "");
             throw new Error(`R2 PUT failed (${putResp.status}): ${txt || "no body"}`);
           }
+
+          // 3) process
+          const dtfOn = dtfSafe.checked;
 
           const payload = {
             key: up.key,
@@ -389,7 +387,7 @@
 
             alphaThreshold: Number(alphaThreshold.value),
             minCoverage: Number(minCoverage.value),
-            alphaMode: dtfSafe.checked ? "binary" : alphaMode.value,
+            alphaMode: dtfOn ? "binary" : alphaMode.value,
           };
 
           const procResp = await fetchWithRetry(`${base}/v1/halftone/process`, {
@@ -401,19 +399,14 @@
           if (!procResp.ok) {
             const body = await jsonOrText(procResp);
             if (procResp.status === 429) {
-              throw new Error(
-                "Processor busy (429). Wait ~5 seconds and click Generate again.\n\n" +
-                JSON.stringify(body, null, 2)
-              );
+              throw new Error("Processor busy (429). Wait ~5 seconds and click Generate again.\n\n" +
+                JSON.stringify(body, null, 2));
             }
             throw new Error(`process failed (${procResp.status}): ${JSON.stringify(body, null, 2)}`);
           }
 
           const proc = await procResp.json();
-
-          if (!proc.downloadUrl) {
-            throw new Error(`process response missing downloadUrl: ${JSON.stringify(proc, null, 2)}`);
-          }
+          if (!proc.downloadUrl) throw new Error(`process response missing downloadUrl: ${JSON.stringify(proc, null, 2)}`);
 
           lastDownloadUrl = proc.downloadUrl;
           outPreview.src = proc.downloadUrl;
@@ -421,13 +414,9 @@
 
           setStatus("Done ✅", "ok");
 
-          const perf = proc.perf
-            ? `\nms: ${proc.perf.ms}\ncells: ${proc.perf.cellCount}\nout: ${proc.perf.outWidth}x${proc.perf.outHeight}`
-            : "";
+          const perf = proc.perf ? `\nms: ${proc.perf.ms}\ncells: ${proc.perf.cellCount}\nout: ${proc.perf.outWidth}x${proc.perf.outHeight}` : "";
+          setDebug(`uploadKey: ${up.key}\noutputKey: ${proc.outputKey || "(not provided)"}\nparams: ${JSON.stringify(proc.params || payload)}${perf}`);
 
-          setDebug(
-            `uploadKey: ${up.key}\noutputKey: ${proc.outputKey || "(not provided)"}\nparams: ${JSON.stringify(proc.params || payload)}${perf}`
-          );
         } catch (err) {
           setStatus(friendlyNetworkError(err), "err");
         } finally {
@@ -441,7 +430,6 @@
         try {
           const resp = await fetchWithRetry(lastDownloadUrl, {}, { tries: 2, delayMs: 500 });
           const blob = await resp.blob();
-
           const a = document.createElement("a");
           a.href = URL.createObjectURL(blob);
           a.download = "halftone.png";
@@ -453,14 +441,13 @@
         }
       });
 
-      // Init labels
+      // init labels
       cellSizeVal.textContent = cellSize.value;
       maxWidthVal.textContent = maxWidth.value;
       dotGainVal.textContent = dotGain.value;
       minDotVal.textContent = minDot.value;
       alphaThresholdVal.textContent = alphaThreshold.value;
       minCoverageVal.textContent = Number(minCoverage.value).toFixed(2);
-      applyDtfSafeUiState();
     </script>
   </body>
 </html>

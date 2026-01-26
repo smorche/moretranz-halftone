@@ -1,411 +1,583 @@
-<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <title>MoreTranz Halftone Tool</title>
-    <style>
-      body { font-family: Arial, sans-serif; max-width: 1120px; margin: 24px auto; padding: 0 16px; }
+import "dotenv/config";
+import crypto from "node:crypto";
+import express from "express";
+import cors from "cors";
+import { z } from "zod";
+import sharp from "sharp";
+import {
+  S3Client,
+  PutObjectCommand,
+  GetObjectCommand,
+  HeadObjectCommand,
+} from "@aws-sdk/client-s3";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
-      .layout {
-        display: grid;
-        grid-template-columns: minmax(360px, 1fr) 460px;
-        gap: 16px;
-        align-items: start;
-      }
-      @media (max-width: 980px) { .layout { grid-template-columns: 1fr; } }
+const app = express();
+app.use(express.json({ limit: "1mb" }));
 
-      .card { border: 1px solid #ddd; border-radius: 12px; padding: 16px; background: #fff; }
-      .previewCol { position: sticky; top: 16px; }
-      @media (max-width: 980px) { .previewCol { position: static; } }
+/** ---------------------------
+ *  Config
+ *  --------------------------*/
+const requiredEnv = [
+  "R2_ENDPOINT",
+  "R2_BUCKET",
+  "R2_REGION",
+  "R2_ACCESS_KEY_ID",
+  "R2_SECRET_ACCESS_KEY",
+];
+for (const k of requiredEnv) {
+  if (!process.env[k]) {
+    console.error(`Missing required env var: ${k}`);
+    process.exit(1);
+  }
+}
 
-      label { display:block; font-size: 14px; margin: 12px 0 6px; font-weight: 600; }
-      input[type="range"] { width: 100%; }
-      select, input[type="file"], input[type="text"], button { width: 100%; padding: 10px; font-size: 14px; box-sizing: border-box; }
-      button { cursor: pointer; }
-      button:disabled { opacity: .6; cursor: not-allowed; }
+const MAX_UPLOAD_BYTES = Number(process.env.MAX_UPLOAD_BYTES || 25 * 1024 * 1024);
+const MAX_IMAGE_PIXELS = Number(process.env.MAX_IMAGE_PIXELS || 50_000_000);
 
-      .muted { color:#666; font-size: 12px; line-height: 1.35; }
-      .ok { color: #0a7a0a; }
-      .err { color: #b00020; white-space: pre-wrap; }
-      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; font-size: 12px; }
-      .pill { display:inline-block; padding: 3px 8px; border: 1px solid #ddd; border-radius: 999px; font-size: 12px; color:#333; background:#fafafa; }
+const HARD_MAX_WIDTH = Number(process.env.HARD_MAX_WIDTH || 3600);
+const SOFT_MAX_WIDTH = Number(process.env.SOFT_MAX_WIDTH || 3200);
+const MIN_CELL = Number(process.env.MIN_CELL || 8);
+const MAX_CELL = Number(process.env.MAX_CELL || 30);
 
-      .btnRow { display:flex; gap:10px; }
-      .btnRow button { width: 100%; }
+const MAX_CONCURRENT_JOBS = Number(process.env.MAX_CONCURRENT_JOBS || 1);
+const MAX_CELLS_ESTIMATE = Number(process.env.MAX_CELLS_ESTIMATE || 700_000);
 
-      .toggleRow {
-        display:flex; align-items:center; justify-content:space-between; gap:12px;
-        padding:10px 12px; border:1px solid #eee; border-radius:10px; background:#fafafa;
-      }
-      .toggleRow input { width:auto; transform: scale(1.15); }
+function clamp(n, min, max) {
+  return Math.max(min, Math.min(max, n));
+}
 
-      .grid2 { display:grid; grid-template-columns: 1fr 1fr; gap:12px; }
-      @media (max-width: 720px) { .grid2 { grid-template-columns: 1fr; } }
+function reqId() {
+  return crypto.randomBytes(8).toString("hex");
+}
 
-      .imgBox {
-        border: 1px solid #eee;
-        border-radius: 10px;
-        background: repeating-conic-gradient(#f6f6f6 0% 25%, #ffffff 0% 50%) 50% / 16px 16px;
-        padding: 8px;
-      }
-      img {
-        display:block;
-        width: 100%;
-        height: auto;
-        max-height: 360px;
-        object-fit: contain;
-        border-radius: 8px;
-      }
-      @media (max-width: 980px) { img { max-height: 420px; } }
-    </style>
-  </head>
-  <body>
-    <h1 style="margin-bottom:8px;">MoreTranz Halftone Tool</h1>
-    <p class="muted" style="margin-top:0;">
-      Uploads to Cloudflare R2, processes on Render, returns a downloadable PNG.
-      <span class="pill">Tip: 12&quot; @ 300dpi = 3600px</span>
-      <span class="pill">DTF-safe output (binary alpha)</span>
-    </p>
+function errJson(code, message, details) {
+  return { error: { code, message, ...(details ? { details } : {}) } };
+}
 
-    <div class="layout">
-      <div class="card">
-        <h3 style="margin-top:0;">1) Choose image</h3>
-        <input id="file" type="file" accept="image/png,image/jpeg,image/webp" />
-        <div id="fileInfo" class="muted" style="margin-top:6px;"></div>
+function logWithReq(req, ...args) {
+  console.log(`[${req._rid}]`, ...args);
+}
 
-        <hr style="border:none;border-top:1px solid #eee;margin:16px 0;"/>
+async function streamToBuffer(stream) {
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  return Buffer.concat(chunks);
+}
 
-        <h3 style="margin:0 0 8px;">2) Settings</h3>
+function sanitizeFilename(name) {
+  return String(name || "file").replace(/[^a-zA-Z0-9._-]/g, "_");
+}
 
-        <label>Dot shape</label>
-        <select id="dotShape">
-          <option value="circle" selected>circle (default)</option>
-          <option value="ellipse">ellipse</option>
-          <option value="square">square</option>
-        </select>
+function luminance255(r, g, b) {
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
 
-        <label>Cell size: <span id="cellSizeVal">12</span></label>
-        <input id="cellSize" type="range" min="8" max="30" step="1" value="12" />
-        <div class="muted">Smaller = more detail but more CPU/RAM.</div>
+/** ---------------------------
+ *  CORS
+ *  --------------------------*/
+const ALLOWED_ORIGINS = new Set([
+  "https://moretranz-halftone.pages.dev",
+  "https://moretranz.com",
+  "https://www.moretranz.com",
+]);
 
-        <label style="margin-top:14px;">Max width: <span id="maxWidthVal">2000</span> px</label>
-        <input id="maxWidth" type="range" min="500" max="3600" step="50" value="2000" />
-        <div class="muted">For 12&quot; @ 300dpi, use 3600. Reduce if performance is slow.</div>
+app.use(
+  cors({
+    origin: (origin, cb) => {
+      if (!origin) return cb(null, true);
+      if (ALLOWED_ORIGINS.has(origin)) return cb(null, true);
+      return cb(new Error(`CORS blocked for origin: ${origin}`));
+    },
+    methods: ["GET", "POST", "OPTIONS"],
+    allowedHeaders: ["Content-Type"],
+    optionsSuccessStatus: 204,
+  })
+);
 
-        <div class="toggleRow" style="margin-top:14px;">
-          <div>
-            <div style="font-weight:700;">DTF Safe Mode</div>
-            <div class="muted">Binary alpha (prevents faint pixels → unwanted white).</div>
-          </div>
-          <input id="dtfSafe" type="checkbox" checked />
-        </div>
+/** ---------------------------
+ *  S3 (Cloudflare R2)
+ *  --------------------------*/
+const s3 = new S3Client({
+  region: process.env.R2_REGION,
+  endpoint: process.env.R2_ENDPOINT,
+  credentials: {
+    accessKeyId: process.env.R2_ACCESS_KEY_ID,
+    secretAccessKey: process.env.R2_SECRET_ACCESS_KEY,
+  },
+});
 
-        <div class="grid2" style="margin-top:10px;">
-          <div>
-            <label>Darkness (dot gain): <span id="dotGainVal">1.35</span></label>
-            <input id="dotGain" type="range" min="0.80" max="1.80" step="0.05" value="1.35" />
-            <div class="muted">Higher = darker (more dot coverage).</div>
-          </div>
-          <div>
-            <label>Min dot: <span id="minDotVal">0.18</span></label>
-            <input id="minDot" type="range" min="0.00" max="0.40" step="0.01" value="0.18" />
-            <div class="muted">Raises highlight dot size to hold brightness in print.</div>
-          </div>
-        </div>
+/** ---------------------------
+ *  Middleware: request id
+ *  --------------------------*/
+app.use((req, _res, next) => {
+  req._rid = reqId();
+  next();
+});
 
-        <details style="margin-top:12px;" open>
-          <summary style="cursor:pointer;font-weight:600;">Advanced (masking thresholds)</summary>
+/** ---------------------------
+ *  Concurrency guard
+ *  --------------------------*/
+let ACTIVE_JOBS = 0;
+function tooBusyResponse(res) {
+  return res
+    .status(429)
+    .json(errJson("BUSY", "Processor busy. Please wait a moment and try again."));
+}
 
-          <div class="grid2" style="margin-top:10px;">
-            <div>
-              <label>Alpha threshold: <span id="alphaThresholdVal">48</span></label>
-              <input id="alphaThreshold" type="range" min="1" max="255" step="1" value="48" />
-              <div class="muted">Only pixels with alpha ≥ this are treated as “real art”.</div>
-            </div>
+/**
+ * Render SVG onto a guaranteed transparent canvas.
+ */
+async function renderSvgToPng({ width, height, svgBuffer }) {
+  return sharp({
+    create: {
+      width,
+      height,
+      channels: 4,
+      background: { r: 0, g: 0, b: 0, alpha: 0 },
+    },
+  })
+    .composite([{ input: svgBuffer }])
+    .png({ compressionLevel: 9, adaptiveFiltering: true })
+    .toBuffer();
+}
 
-            <div>
-              <label>Min coverage: <span id="minCoverageVal">0.20</span></label>
-              <input id="minCoverage" type="range" min="0.00" max="0.80" step="0.01" value="0.20" />
-              <div class="muted">Cell must have this % of “real art” pixels to emit a dot.</div>
-            </div>
-          </div>
-        </details>
+function alphaStats(rgba) {
+  let nonZero = 0;
+  let ge48 = 0;
+  let ge100 = 0;
+  let ge200 = 0;
 
-        <label style="margin-top:14px;">API base URL</label>
-        <input id="apiBase" class="mono" value="https://moretranz-halftone.onrender.com" />
+  for (let i = 3; i < rgba.length; i += 4) {
+    const a = rgba[i];
+    if (a > 0) nonZero++;
+    if (a >= 48) ge48++;
+    if (a >= 100) ge100++;
+    if (a >= 200) ge200++;
+  }
 
-        <div class="btnRow" style="margin-top:14px;">
-          <button id="go">Generate Halftone</button>
-          <button id="reset" type="button">Reset defaults</button>
-        </div>
+  const total = rgba.length / 4;
+  return {
+    total,
+    nonZeroPct: nonZero / total,
+    ge48Pct: ge48 / total,
+    ge100Pct: ge100 / total,
+    ge200Pct: ge200 / total,
+  };
+}
 
-        <div id="status" style="margin-top:12px;"></div>
-        <div id="debug" class="mono muted" style="margin-top:10px;"></div>
-      </div>
+/**
+ * Full-color halftone with DTF-safe binary alpha:
+ * - sampling only from "real pixels" (alphaThreshold)
+ * - emitting dots only if cell has enough real coverage (minCoverage)
+ * - binary mask is built from dot luminance and joined as a TRUE 1-channel alpha
+ */
+async function makeColorHalftonePng(inputBuffer, opts) {
+  const {
+    cellSize,
+    maxWidth,
+    dotShape,
+    dotGain,
+    minDot,
+    alphaThreshold,
+    minCoverage,
+    alphaMode, // "binary" | "average"
+  } = opts;
 
-      <div class="card previewCol">
-        <h3 style="margin-top:0;">Preview</h3>
+  const base = sharp(inputBuffer, { failOn: "none" });
 
-        <div class="muted">Original</div>
-        <div class="imgBox"><img id="origPreview" alt="" /></div>
+  const meta = await base.metadata();
+  if (!meta.width || !meta.height) throw new Error("Could not read image dimensions");
 
-        <div style="height:12px;"></div>
+  const pixels = meta.width * meta.height;
+  if (pixels > MAX_IMAGE_PIXELS) {
+    throw new Error(`Image too large: ${pixels} pixels exceeds limit ${MAX_IMAGE_PIXELS}`);
+  }
 
-        <div class="muted">Halftone output</div>
-        <div class="imgBox"><img id="outPreview" alt="" /></div>
+  const targetW = clamp(Math.min(meta.width, maxWidth), 256, HARD_MAX_WIDTH);
+  const resized = base.resize({ width: targetW, withoutEnlargement: true });
 
-        <button id="download" style="margin-top:12px;" disabled>Download PNG</button>
-      </div>
-    </div>
+  const rMeta = await resized.metadata();
+  const w = rMeta.width;
+  const h = rMeta.height;
+  if (!w || !h) throw new Error("Could not read resized dimensions");
 
-    <script>
-      const $ = (id) => document.getElementById(id);
+  const cs = clamp(Math.floor(cellSize), MIN_CELL, MAX_CELL);
+  const cols = Math.ceil(w / cs);
+  const rows = Math.ceil(h / cs);
+  const cellCount = cols * rows;
 
-      const fileEl = $("file");
-      const fileInfo = $("fileInfo");
-      const origPreview = $("origPreview");
-      const outPreview = $("outPreview");
-      const statusEl = $("status");
-      const debugEl = $("debug");
-      const goBtn = $("go");
-      const resetBtn = $("reset");
-      const dlBtn = $("download");
-      const apiBase = $("apiBase");
+  if (cellCount > MAX_CELLS_ESTIMATE) {
+    throw new Error(
+      `Settings too heavy (estimated cells=${cellCount}). Increase cell size or reduce max width.`
+    );
+  }
 
-      const cellSize = $("cellSize");
-      const maxWidth = $("maxWidth");
-      const dotShape = $("dotShape");
-      const cellSizeVal = $("cellSizeVal");
-      const maxWidthVal = $("maxWidthVal");
+  const { data } = await resized.ensureAlpha().raw().toBuffer({ resolveWithObject: true });
 
-      const dtfSafe = $("dtfSafe");
-      const dotGain = $("dotGain");
-      const minDot = $("minDot");
-      const dotGainVal = $("dotGainVal");
-      const minDotVal = $("minDotVal");
+  const aStats = alphaStats(data);
+  console.log("ALPHA STATS", {
+    total: aStats.total,
+    nonZeroPct: aStats.nonZeroPct.toFixed(4),
+    ge48Pct: aStats.ge48Pct.toFixed(4),
+    ge100Pct: aStats.ge100Pct.toFixed(4),
+    ge200Pct: aStats.ge200Pct.toFixed(4),
+  });
 
-      const alphaThreshold = $("alphaThreshold");
-      const minCoverage = $("minCoverage");
-      const alphaThresholdVal = $("alphaThresholdVal");
-      const minCoverageVal = $("minCoverageVal");
+  const aThresh = clamp(Math.floor(alphaThreshold), 1, 255);
+  const covMin = clamp(Number(minCoverage), 0, 1);
+  const dg = clamp(Number(dotGain), 0.6, 2.0);
+  const minFrac = clamp(Number(minDot), 0, 0.6);
 
-      const DEFAULTS = {
-        dotShape: "circle",
-        cellSize: 12,
-        maxWidth: 2000,
-        apiBase: "https://moretranz-halftone.onrender.com",
-        dtfSafe: true,
-        dotGain: 1.35,
-        minDot: 0.18,
-        alphaThreshold: 48,
-        minCoverage: 0.20,
-      };
+  const half = cs / 2;
 
-      cellSize.addEventListener("input", () => (cellSizeVal.textContent = cellSize.value));
-      maxWidth.addEventListener("input", () => (maxWidthVal.textContent = maxWidth.value));
-      dotGain.addEventListener("input", () => (dotGainVal.textContent = dotGain.value));
-      minDot.addEventListener("input", () => (minDotVal.textContent = minDot.value));
-      alphaThreshold.addEventListener("input", () => (alphaThresholdVal.textContent = alphaThreshold.value));
-      minCoverage.addEventListener("input", () => (minCoverageVal.textContent = Number(minCoverage.value).toFixed(2)));
+  const colorShapes = [];
+  const maskShapes = [];
 
-      function setStatus(msg, kind="") {
-        statusEl.className = kind === "err" ? "err" : (kind === "ok" ? "ok" : "");
-        statusEl.textContent = msg;
-      }
-      function setDebug(msg) { debugEl.textContent = msg; }
+  for (let row = 0; row < rows; row++) {
+    const y0 = row * cs;
+    const y1 = Math.min(y0 + cs, h);
 
-      function normalizeBaseUrl(raw) {
-        return String(raw || "").trim().replace(/\/+$/, "");
-      }
+    for (let col = 0; col < cols; col++) {
+      const x0 = col * cs;
+      const x1 = Math.min(x0 + cs, w);
 
-      async function jsonOrText(resp) {
-        const ct = resp.headers.get("content-type") || "";
-        if (ct.includes("application/json")) return resp.json();
-        return resp.text();
-      }
+      let rSum = 0,
+        gSum = 0,
+        bSum = 0;
 
-      function friendlyNetworkError(err) {
-        const m = String(err?.message || err || "");
-        if (m.includes("Failed to fetch")) {
-          return [
-            "Failed to fetch",
-            "",
-            "This usually means the API was temporarily unavailable (restart) or your browser blocked the request.",
-            "Try again in 5–10 seconds.",
-          ].join("\n");
-        }
-        return m;
-      }
+      let solidCount = 0;
+      let totalCount = 0;
 
-      async function fetchWithRetry(url, opts, { tries = 2, delayMs = 700 } = {}) {
-        let lastErr;
-        for (let i = 0; i < tries; i++) {
-          try {
-            return await fetch(url, opts);
-          } catch (e) {
-            lastErr = e;
-            if (i < tries - 1) await new Promise(r => setTimeout(r, delayMs));
+      for (let y = y0; y < y1; y++) {
+        const rowBase = y * w * 4;
+        for (let x = x0; x < x1; x++) {
+          const idx = rowBase + x * 4;
+          const aPx = data[idx + 3];
+          totalCount++;
+
+          if (aPx >= aThresh) {
+            rSum += data[idx];
+            gSum += data[idx + 1];
+            bSum += data[idx + 2];
+            solidCount++;
           }
         }
-        throw lastErr;
       }
 
-      let lastDownloadUrl = null;
+      if (!totalCount || solidCount === 0) continue;
 
-      fileEl.addEventListener("change", () => {
-        const f = fileEl.files?.[0];
-        if (!f) return;
+      const coverage = solidCount / totalCount;
+      if (coverage < covMin) continue;
 
-        fileInfo.textContent = `${f.name} — ${f.type || "unknown"} — ${f.size.toLocaleString()} bytes`;
-        origPreview.src = URL.createObjectURL(f);
+      const r = Math.round(rSum / solidCount);
+      const g = Math.round(gSum / solidCount);
+      const b = Math.round(bSum / solidCount);
 
-        outPreview.removeAttribute("src");
-        dlBtn.disabled = true;
-        lastDownloadUrl = null;
+      let darkness = 1 - luminance255(r, g, b) / 255;
+      darkness = Math.pow(darkness, 1 / dg);
 
-        setStatus("");
-        setDebug("");
-      });
+      const frac = clamp(minFrac + (1 - minFrac) * darkness, 0, 1);
+      const radius = half * frac;
+      if (radius < 0.15) continue;
 
-      resetBtn.addEventListener("click", () => {
-        dotShape.value = DEFAULTS.dotShape;
-        cellSize.value = DEFAULTS.cellSize;
-        maxWidth.value = DEFAULTS.maxWidth;
-        apiBase.value = DEFAULTS.apiBase;
+      const cx = x0 + (x1 - x0) / 2;
+      const cy = y0 + (y1 - y0) / 2;
 
-        dtfSafe.checked = DEFAULTS.dtfSafe;
-        dotGain.value = DEFAULTS.dotGain;
-        minDot.value = DEFAULTS.minDot;
-        alphaThreshold.value = DEFAULTS.alphaThreshold;
-        minCoverage.value = DEFAULTS.minCoverage;
+      const fill = `rgb(${r},${g},${b})`;
+      const fillOpacity = alphaMode === "average" ? clamp(coverage, 0, 1).toFixed(4) : "1";
 
-        cellSizeVal.textContent = DEFAULTS.cellSize;
-        maxWidthVal.textContent = DEFAULTS.maxWidth;
-        dotGainVal.textContent = DEFAULTS.dotGain;
-        minDotVal.textContent = DEFAULTS.minDot;
-        alphaThresholdVal.textContent = DEFAULTS.alphaThreshold;
-        minCoverageVal.textContent = Number(DEFAULTS.minCoverage).toFixed(2);
+      if (dotShape === "square") {
+        const size = radius * 2;
+        const x = (cx - size / 2).toFixed(2);
+        const y = (cy - size / 2).toFixed(2);
+        const s = size.toFixed(2);
 
-        setStatus("");
-        setDebug("");
-      });
+        colorShapes.push(
+          `<rect x="${x}" y="${y}" width="${s}" height="${s}" fill="${fill}" fill-opacity="${fillOpacity}" />`
+        );
+        maskShapes.push(`<rect x="${x}" y="${y}" width="${s}" height="${s}" fill="white" />`);
+      } else if (dotShape === "ellipse") {
+        const rx = (radius * 1.2).toFixed(2);
+        const ry = (radius * 0.85).toFixed(2);
+        const cxs = cx.toFixed(2);
+        const cys = cy.toFixed(2);
 
-      goBtn.addEventListener("click", async () => {
-        const f = fileEl.files?.[0];
-        if (!f) return setStatus("Please choose an image first.", "err");
+        colorShapes.push(
+          `<ellipse cx="${cxs}" cy="${cys}" rx="${rx}" ry="${ry}" fill="${fill}" fill-opacity="${fillOpacity}" />`
+        );
+        maskShapes.push(`<ellipse cx="${cxs}" cy="${cys}" rx="${rx}" ry="${ry}" fill="white" />`);
+      } else {
+        const cxs = cx.toFixed(2);
+        const cys = cy.toFixed(2);
+        const rs = radius.toFixed(2);
 
-        const allowed = ["image/png", "image/jpeg", "image/webp"];
-        if (!allowed.includes(f.type)) return setStatus(`Unsupported type: ${f.type}`, "err");
+        colorShapes.push(
+          `<circle cx="${cxs}" cy="${cys}" r="${rs}" fill="${fill}" fill-opacity="${fillOpacity}" />`
+        );
+        maskShapes.push(`<circle cx="${cxs}" cy="${cys}" r="${rs}" fill="white" />`);
+      }
+    }
+  }
 
-        const base = normalizeBaseUrl(apiBase.value);
-        if (!base.startsWith("http")) return setStatus("API base URL must start with http/https.", "err");
+  const colorSvg = `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">
+  ${colorShapes.join("")}
+</svg>`;
 
-        setStatus("Working…");
-        setDebug("");
-        goBtn.disabled = true;
-        resetBtn.disabled = true;
-        dlBtn.disabled = true;
+  const maskSvg = `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">
+  ${maskShapes.join("")}
+</svg>`;
 
-        try {
-          const upResp = await fetchWithRetry(`${base}/v1/halftone/upload-url`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              filename: f.name,
-              contentType: f.type,
-              contentLength: f.size
-            })
-          }, { tries: 2, delayMs: 500 });
+  const colorPng = await renderSvgToPng({
+    width: w,
+    height: h,
+    svgBuffer: Buffer.from(colorSvg),
+  });
 
-          if (!upResp.ok) {
-            const body = await jsonOrText(upResp);
-            throw new Error(`upload-url failed (${upResp.status}): ${JSON.stringify(body, null, 2)}`);
-          }
-          const up = await upResp.json();
+  const maskPng = await renderSvgToPng({
+    width: w,
+    height: h,
+    svgBuffer: Buffer.from(maskSvg),
+  });
 
-          const putResp = await fetchWithRetry(up.uploadUrl, {
-            method: "PUT",
-            headers: up.headers || { "Content-Type": f.type },
-            body: f
-          }, { tries: 2, delayMs: 500 });
+  if (alphaMode === "binary") {
+    /**
+     * ✅ FIX:
+     * Build a TRUE single-channel alpha mask (raw 1-channel),
+     * then join it as alpha. This prevents the full-rectangle artifact.
+     */
+    const alphaRaw = await sharp(maskPng)
+      .ensureAlpha()
+      .removeAlpha()
+      .greyscale()
+      .threshold(12) // adjust to 20 if you ever see stray dots/noise
+      .raw()
+      .toBuffer();
 
-          if (!putResp.ok) {
-            const txt = await putResp.text().catch(() => "");
-            throw new Error(`R2 PUT failed (${putResp.status}): ${txt || "no body"}`);
-          }
+    const rgbRaw = await sharp(colorPng)
+      .ensureAlpha()
+      .removeAlpha()
+      .raw()
+      .toBuffer();
 
-          const payload = {
-            key: up.key,
-            cellSize: Number(cellSize.value),
-            maxWidth: Number(maxWidth.value),
-            dotShape: dotShape.value,
-            dotGain: Number(dotGain.value),
-            minDot: Number(minDot.value),
-            alphaThreshold: Number(alphaThreshold.value),
-            minCoverage: Number(minCoverage.value),
-            alphaMode: dtfSafe.checked ? "binary" : "average",
-          };
+    const out = await sharp(rgbRaw, { raw: { width: w, height: h, channels: 3 } })
+      .joinChannel(alphaRaw, { raw: { width: w, height: h, channels: 1 } })
+      .png({ compressionLevel: 9, adaptiveFiltering: true })
+      .toBuffer();
 
-          const procResp = await fetchWithRetry(`${base}/v1/halftone/process`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload)
-          }, { tries: 2, delayMs: 900 });
+    return { png: out, width: w, height: h, cellCount };
+  }
 
-          if (!procResp.ok) {
-            const body = await jsonOrText(procResp);
-            if (procResp.status === 429) {
-              throw new Error("Processor busy (429). Wait ~5 seconds and click Generate again.\n\n" +
-                JSON.stringify(body, null, 2));
-            }
-            throw new Error(`process failed (${procResp.status}): ${JSON.stringify(body, null, 2)}`);
-          }
+  return { png: colorPng, width: w, height: h, cellCount };
+}
 
-          const proc = await procResp.json();
-          if (!proc.downloadUrl) throw new Error(`process response missing downloadUrl: ${JSON.stringify(proc, null, 2)}`);
+/** ---------------------------
+ *  Routes
+ *  --------------------------*/
+app.get("/health", (_req, res) => res.json({ ok: true }));
 
-          lastDownloadUrl = proc.downloadUrl;
-          outPreview.src = proc.downloadUrl;
-          dlBtn.disabled = false;
+const UploadUrlRequest = z.object({
+  filename: z.string().min(1),
+  contentType: z.enum(["image/png", "image/jpeg", "image/webp"]),
+  contentLength: z.number().int().positive().max(MAX_UPLOAD_BYTES),
+});
 
-          setStatus("Done ✅", "ok");
+app.post("/v1/halftone/upload-url", async (req, res) => {
+  try {
+    const parsed = UploadUrlRequest.safeParse(req.body);
+    if (!parsed.success) {
+      return res
+        .status(400)
+        .json(errJson("BAD_REQUEST", "Invalid request", { issues: parsed.error.flatten() }));
+    }
 
-          const perf = proc.perf ? `\nms: ${proc.perf.ms}\ncells: ${proc.perf.cellCount}\nout: ${proc.perf.outWidth}x${proc.perf.outHeight}` : "";
-          setDebug(`uploadKey: ${up.key}\noutputKey: ${proc.outputKey || "(not provided)"}${perf}`);
-        } catch (err) {
-          setStatus(friendlyNetworkError(err), "err");
-        } finally {
-          goBtn.disabled = false;
-          resetBtn.disabled = false;
-        }
-      });
+    const { filename, contentType, contentLength } = parsed.data;
 
-      dlBtn.addEventListener("click", async () => {
-        if (!lastDownloadUrl) return;
+    const safeName = sanitizeFilename(filename);
+    const imageId = `img_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
+    const key = `uploads/${imageId}/${safeName}`;
 
-        try {
-          const resp = await fetchWithRetry(lastDownloadUrl, {}, { tries: 2, delayMs: 500 });
-          const blob = await resp.blob();
+    const cmd = new PutObjectCommand({
+      Bucket: process.env.R2_BUCKET,
+      Key: key,
+      ContentType: contentType,
+    });
 
-          const a = document.createElement("a");
-          a.href = URL.createObjectURL(blob);
-          a.download = "halftone.png";
-          document.body.appendChild(a);
-          a.click();
-          a.remove();
-        } catch (err) {
-          setStatus(friendlyNetworkError(err), "err");
-        }
-      });
+    const uploadUrl = await getSignedUrl(s3, cmd, { expiresIn: 600 });
+    logWithReq(req, "ISSUED UPLOAD URL", { key, contentType, contentLength });
 
-      // init labels
-      cellSizeVal.textContent = cellSize.value;
-      maxWidthVal.textContent = maxWidth.value;
-      dotGainVal.textContent = dotGain.value;
-      minDotVal.textContent = minDot.value;
-      alphaThresholdVal.textContent = alphaThreshold.value;
-      minCoverageVal.textContent = Number(minCoverage.value).toFixed(2);
-    </script>
-  </body>
-</html>
+    return res.json({
+      imageId,
+      key,
+      uploadUrl,
+      headers: { "Content-Type": contentType },
+      maxBytes: MAX_UPLOAD_BYTES,
+    });
+  } catch (e) {
+    console.error(`[${req._rid}] upload-url error`, e);
+    return res.status(500).json(errJson("INTERNAL", "Failed to create upload URL"));
+  }
+});
+
+const ProcessRequest = z.object({
+  key: z.string().min(1),
+
+  cellSize: z.number().int().min(MIN_CELL).max(MAX_CELL).default(12),
+  maxWidth: z.number().int().min(256).max(4000).default(2000),
+  dotShape: z.enum(["circle", "square", "ellipse"]).default("circle"),
+
+  dotGain: z.number().min(0.6).max(2.0).default(1.35),
+  minDot: z.number().min(0.0).max(0.6).default(0.18),
+
+  alphaThreshold: z.number().int().min(1).max(255).default(48),
+  minCoverage: z.number().min(0).max(1).default(0.20),
+
+  alphaMode: z.enum(["binary", "average"]).default("binary"),
+});
+
+app.post("/v1/halftone/process", async (req, res) => {
+  const parsed = ProcessRequest.safeParse(req.body);
+  if (!parsed.success) {
+    return res
+      .status(400)
+      .json(errJson("BAD_REQUEST", "Invalid request", { issues: parsed.error.flatten() }));
+  }
+
+  if (ACTIVE_JOBS >= MAX_CONCURRENT_JOBS) return tooBusyResponse(res);
+  ACTIVE_JOBS++;
+
+  const {
+    key,
+    cellSize,
+    maxWidth,
+    dotShape,
+    dotGain,
+    minDot,
+    alphaThreshold,
+    minCoverage,
+    alphaMode,
+  } = parsed.data;
+
+  const maxWidthClamped = clamp(maxWidth, 256, HARD_MAX_WIDTH);
+
+  try {
+    const started = Date.now();
+
+    if (maxWidthClamped > SOFT_MAX_WIDTH) {
+      logWithReq(req, "HIGH MEMORY REQUEST (soft warning)", { maxWidth: maxWidthClamped, cellSize, dotShape });
+    }
+
+    logWithReq(req, "PROCESS PARAMS", {
+      key,
+      cellSize,
+      maxWidth: maxWidthClamped,
+      dotShape,
+      dotGain,
+      minDot,
+      alphaThreshold,
+      minCoverage,
+      alphaMode,
+    });
+
+    try {
+      const head = await s3.send(new HeadObjectCommand({ Bucket: process.env.R2_BUCKET, Key: key }));
+      if (typeof head.ContentLength === "number" && head.ContentLength > MAX_UPLOAD_BYTES) {
+        return res.status(413).json(errJson("TOO_LARGE", `File exceeds max upload size (${MAX_UPLOAD_BYTES} bytes)`));
+      }
+    } catch (e) {
+      logWithReq(req, "HeadObject warning:", String(e?.name || e));
+    }
+
+    const obj = await s3.send(new GetObjectCommand({ Bucket: process.env.R2_BUCKET, Key: key }));
+    if (!obj.Body) return res.status(404).json(errJson("NOT_FOUND", "Input object not found"));
+
+    const inputBuffer = await streamToBuffer(obj.Body);
+
+    if (inputBuffer.length <= 0) return res.status(400).json(errJson("BAD_IMAGE", "Uploaded file is empty"));
+    if (inputBuffer.length > MAX_UPLOAD_BYTES) {
+      return res.status(413).json(errJson("TOO_LARGE", `File exceeds max upload size (${MAX_UPLOAD_BYTES} bytes)`));
+    }
+
+    let meta;
+    try {
+      meta = await sharp(inputBuffer, { failOn: "none" }).metadata();
+    } catch (e) {
+      logWithReq(req, "BAD IMAGE (sharp decode failed):", e?.message || e);
+      return res.status(400).json(errJson("BAD_IMAGE", "Unsupported or corrupted image file"));
+    }
+
+    if (!meta.format || !["png", "jpeg", "webp"].includes(meta.format)) {
+      return res.status(400).json(
+        errJson("BAD_IMAGE", "Unsupported image format (only PNG, JPG, WEBP)", { format: meta.format || null })
+      );
+    }
+    if (!meta.width || !meta.height) return res.status(400).json(errJson("BAD_IMAGE", "Could not read image dimensions"));
+
+    const totalPixels = meta.width * meta.height;
+    if (totalPixels > MAX_IMAGE_PIXELS) {
+      return res.status(413).json(
+        errJson("TOO_LARGE", `Image resolution too large (${totalPixels} pixels)`, {
+          width: meta.width,
+          height: meta.height,
+          maxPixels: MAX_IMAGE_PIXELS,
+        })
+      );
+    }
+
+    const { png, width, height, cellCount } = await makeColorHalftonePng(inputBuffer, {
+      cellSize,
+      maxWidth: maxWidthClamped,
+      dotShape,
+      dotGain,
+      minDot,
+      alphaThreshold,
+      minCoverage,
+      alphaMode,
+    });
+
+    const outId = `ht_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
+    const outputKey = `outputs/${outId}.png`;
+
+    await s3.send(
+      new PutObjectCommand({
+        Bucket: process.env.R2_BUCKET,
+        Key: outputKey,
+        Body: png,
+        ContentType: "image/png",
+      })
+    );
+
+    const downloadUrl = await getSignedUrl(
+      s3,
+      new GetObjectCommand({ Bucket: process.env.R2_BUCKET, Key: outputKey }),
+      { expiresIn: 600 }
+    );
+
+    const ms = Date.now() - started;
+    logWithReq(req, "PROCESS OK", { outputKey, width, height, cellCount, ms });
+
+    return res.json({
+      ok: true,
+      inputKey: key,
+      outputKey,
+      format: "png",
+      transparent: true,
+      params: { cellSize, maxWidth: maxWidthClamped, dotShape, dotGain, minDot, alphaThreshold, minCoverage, alphaMode },
+      perf: { ms, cellCount, outWidth: width, outHeight: height },
+      downloadUrl,
+    });
+  } catch (e) {
+    console.error(`[${req._rid}] HALFTONE ERROR:`, e);
+    return res.status(500).json(errJson("INTERNAL", "Failed to process halftone"));
+  } finally {
+    ACTIVE_JOBS--;
+  }
+});
+
+/** ---------------------------
+ *  Start
+ *  --------------------------*/
+const port = process.env.PORT || 3000;
+app.listen(port, () => console.log(`API listening on port ${port}`));

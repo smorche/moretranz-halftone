@@ -5,87 +5,129 @@
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <title>MoreTranz Halftone Tool</title>
     <style>
-      :root { --pageMax: 1180px; --previewW: 420px; }
-      body { font-family: Arial, sans-serif; margin: 24px auto; padding: 0 16px; max-width: var(--pageMax); }
-      h1 { margin: 0 0 8px; }
+      :root { --cardRadius: 12px; }
 
-      .muted { color:#666; font-size: 12px; line-height: 1.35; }
-      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; font-size: 12px; }
-      .pill { display:inline-block; padding: 3px 8px; border: 1px solid #ddd; border-radius: 999px; font-size: 12px; color:#333; background:#fafafa; }
+      body {
+        font-family: Arial, sans-serif;
+        max-width: 1120px;
+        margin: 24px auto;
+        padding: 0 16px;
+        background: #fff;
+      }
 
-      .grid {
-        display: grid;
-        grid-template-columns: 1fr var(--previewW);
+      .row {
+        display: flex;
         gap: 16px;
-        align-items: start;
-      }
-      @media (max-width: 980px) {
-        .grid { grid-template-columns: 1fr; }
+        align-items: flex-start;
       }
 
-      .card { border: 1px solid #ddd; border-radius: 12px; padding: 16px; background: #fff; }
+      .card {
+        border: 1px solid #ddd;
+        border-radius: var(--cardRadius);
+        padding: 16px;
+        background: #fff;
+      }
+
+      /* LEFT: flexible */
+      .card.left {
+        flex: 1 1 auto;
+        min-width: 360px;
+      }
+
+      /* RIGHT: fixed-ish so previews don't blow up on wide monitors */
+      .card.right {
+        flex: 0 0 460px;
+        width: 460px;
+      }
+
+      @media (max-width: 980px) {
+        .row { flex-wrap: wrap; }
+        .card.right { flex: 1 1 460px; width: auto; }
+      }
+
       label { display:block; font-size: 14px; margin: 12px 0 6px; font-weight: 600; }
       input[type="range"] { width: 100%; }
       select, input[type="file"], input[type="text"], button { width: 100%; padding: 10px; font-size: 14px; box-sizing: border-box; }
       button { cursor: pointer; }
       button:disabled { opacity: .6; cursor: not-allowed; }
 
+      .muted { color:#666; font-size: 12px; line-height: 1.35; }
       .ok { color: #0a7a0a; }
       .err { color: #b00020; white-space: pre-wrap; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; font-size: 12px; }
+      .pill { display:inline-block; padding: 3px 8px; border: 1px solid #ddd; border-radius: 999px; font-size: 12px; color:#333; background:#fafafa; }
 
-      .btnRow { display:flex; gap:10px; margin-top: 14px; }
+      .btnRow { display:flex; gap:10px; }
       .btnRow button { width: 100%; }
 
-      .previewCard { width: var(--previewW); }
-      @media (max-width: 980px) { .previewCard { width: auto; } }
+      .previewBlock { margin-top: 10px; }
+      .previewLabel { margin: 0 0 6px; font-size: 12px; color: #666; }
 
-      .imgWrap {
+      /* Previews: keep contained and stacked */
+      img.preview {
+        width: 100%;
+        max-height: 320px;
+        object-fit: contain;
         border: 1px solid #eee;
         border-radius: 10px;
-        padding: 8px;
-        background: #fff;
-      }
-
-      img.previewImg {
-        display:block;
-        width: 100%;
-        height: auto;
-        max-height: 360px;   /* keeps them “stacked” and not huge */
-        object-fit: contain;
-        border-radius: 8px;
-        border: 1px solid #eee;
         background: repeating-conic-gradient(#f6f6f6 0% 25%, #ffffff 0% 50%) 50% / 16px 16px;
+        display: block;
       }
 
-      details > summary { cursor: pointer; font-weight: 700; margin-top: 10px; }
-      .twoCol { display:grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-      @media (max-width: 560px) { .twoCol { grid-template-columns: 1fr; } }
+      details {
+        margin-top: 10px;
+        border: 1px solid #eee;
+        border-radius: 10px;
+        padding: 10px;
+        background: #fafafa;
+      }
+
+      details > summary {
+        cursor: pointer;
+        font-weight: 700;
+        font-size: 14px;
+      }
+
+      .twoCol {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 12px;
+      }
+      @media (max-width: 520px) {
+        .twoCol { grid-template-columns: 1fr; }
+      }
 
       .toggleRow {
-        display:flex; gap:10px; align-items:center; justify-content: space-between;
-        padding: 10px 12px; border: 1px solid #eee; border-radius: 10px; background:#fafafa;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 12px;
         margin-top: 12px;
+        padding: 10px;
+        border: 1px solid #eee;
+        border-radius: 10px;
+        background: #fafafa;
       }
+
       .toggleRow label { margin: 0; font-weight: 700; }
-      .toggleRow .muted { margin: 0; }
-      .toggleRow input { width: auto; transform: scale(1.1); }
+      .toggleRow .muted { margin-top: 2px; }
     </style>
   </head>
   <body>
-    <h1>MoreTranz Halftone Tool</h1>
+    <h1 style="margin-bottom:8px;">MoreTranz Halftone Tool</h1>
     <p class="muted" style="margin-top:0;">
       Uploads to Cloudflare R2, processes on Render, returns a downloadable PNG.
       <span class="pill">Tip: 12&quot; @ 300dpi = 3600px</span>
-      <span class="pill">DTF-safe output (binary alpha)</span>
+      <span class="pill">DTF-safe output = binary alpha</span>
     </p>
 
-    <div class="grid">
-      <div class="card">
+    <div class="row">
+      <div class="card left">
         <h3 style="margin-top:0;">1) Choose image</h3>
         <input id="file" type="file" accept="image/png,image/jpeg,image/webp" />
         <div id="fileInfo" class="muted" style="margin-top:6px;"></div>
 
-        <hr style="border:none;border-top:1px solid #eee;margin:16px 0;" />
+        <hr style="border:none;border-top:1px solid #eee;margin:16px 0;"/>
 
         <h3 style="margin:0 0 8px;">2) Settings</h3>
 
@@ -107,36 +149,37 @@
         <div class="toggleRow">
           <div>
             <label for="dtfSafe">DTF Safe Mode</label>
-            <div class="muted">Binary alpha to prevent unwanted white underbase.</div>
+            <div class="muted">Binary alpha (prevents faint pixels → unwanted white underbase).</div>
           </div>
           <input id="dtfSafe" type="checkbox" checked />
         </div>
 
-        <div class="twoCol" style="margin-top:12px;">
+        <div class="twoCol" style="margin-top: 10px;">
           <div>
-            <label>Darkness (dot gain): <span id="dotGainVal">1.35</span></label>
-            <input id="dotGain" type="range" min="0.50" max="2.50" step="0.05" value="1.35" />
-            <div class="muted">Higher = darker (more dot coverage).</div>
+            <label>Darkness (dot gain): <span id="dotGainVal">1.25</span></label>
+            <input id="dotGain" type="range" min="0.5" max="2.2" step="0.05" value="1.25" />
+            <div class="muted">Higher = darker (more dot coverage in midtones/darks).</div>
           </div>
           <div>
-            <label>Min dot: <span id="minDotVal">0.18</span></label>
-            <input id="minDot" type="range" min="0" max="0.60" step="0.01" value="0.18" />
-            <div class="muted">Raises highlight dot size to hold brightness in print.</div>
+            <label>Min dot: <span id="minDotVal">0.12</span></label>
+            <input id="minDot" type="range" min="0" max="0.6" step="0.01" value="0.12" />
+            <div class="muted">Raises highlight dot size to keep brightness in print.</div>
           </div>
         </div>
 
-        <details style="margin-top:10px;">
+        <details id="advanced">
           <summary>Advanced (masking thresholds)</summary>
-          <div class="twoCol" style="margin-top:10px;">
+
+          <div class="twoCol" style="margin-top: 10px;">
             <div>
               <label>Alpha threshold: <span id="alphaThresholdVal">48</span></label>
-              <input id="alphaThreshold" type="range" min="0" max="255" step="1" value="48" />
-              <div class="muted">Only pixels with alpha ≥ this count as “real art”.</div>
+              <input id="alphaThreshold" type="range" min="1" max="255" step="1" value="48" />
+              <div class="muted">Only pixels with alpha ≥ this are treated as “real art” (DTF mode).</div>
             </div>
             <div>
               <label>Min coverage: <span id="minCoverageVal">0.20</span></label>
               <input id="minCoverage" type="range" min="0" max="1" step="0.01" value="0.20" />
-              <div class="muted">Cell must have this % of “real art” pixels to emit a dot.</div>
+              <div class="muted">Cell must have this % of “real art” pixels to emit a dot (DTF mode).</div>
             </div>
           </div>
         </details>
@@ -144,7 +187,7 @@
         <label style="margin-top:14px;">API base URL</label>
         <input id="apiBase" class="mono" value="https://moretranz-halftone.onrender.com" />
 
-        <div class="btnRow">
+        <div class="btnRow" style="margin-top:14px;">
           <button id="go">Generate Halftone</button>
           <button id="reset" type="button">Reset defaults</button>
         </div>
@@ -153,19 +196,17 @@
         <div id="debug" class="mono muted" style="margin-top:10px;"></div>
       </div>
 
-      <div class="card previewCard">
+      <div class="card right">
         <h3 style="margin-top:0;">Preview</h3>
 
-        <div class="muted">Original</div>
-        <div class="imgWrap">
-          <img id="origPreview" class="previewImg" alt="" />
+        <div class="previewBlock">
+          <div class="previewLabel">Original</div>
+          <img id="origPreview" class="preview" alt="" />
         </div>
 
-        <div style="height:12px;"></div>
-
-        <div class="muted">Halftone output</div>
-        <div class="imgWrap">
-          <img id="outPreview" class="previewImg" alt="" />
+        <div class="previewBlock" style="margin-top: 12px;">
+          <div class="previewLabel">Halftone output</div>
+          <img id="outPreview" class="preview" alt="" />
         </div>
 
         <button id="download" style="margin-top:12px;" disabled>Download PNG</button>
@@ -209,26 +250,79 @@
         maxWidth: 2000,
         apiBase: "https://moretranz-halftone.onrender.com",
         dtfSafe: true,
-        dotGain: 1.35,
-        minDot: 0.18,
+        dotGain: 1.25,
+        minDot: 0.12,
         alphaThreshold: 48,
         minCoverage: 0.20
       };
+
+      function syncLabels() {
+        cellSizeVal.textContent = cellSize.value;
+        maxWidthVal.textContent = maxWidth.value;
+        dotGainVal.textContent = Number(dotGain.value).toFixed(2);
+        minDotVal.textContent = Number(minDot.value).toFixed(2);
+        alphaThresholdVal.textContent = alphaThreshold.value;
+        minCoverageVal.textContent = Number(minCoverage.value).toFixed(2);
+      }
+
+      cellSize.addEventListener("input", syncLabels);
+      maxWidth.addEventListener("input", syncLabels);
+      dotGain.addEventListener("input", syncLabels);
+      minDot.addEventListener("input", syncLabels);
+      alphaThreshold.addEventListener("input", syncLabels);
+      minCoverage.addEventListener("input", syncLabels);
+
+      let lastDownloadUrl = null;
+
+      resetBtn.addEventListener("click", () => {
+        dotShape.value = DEFAULTS.dotShape;
+        cellSize.value = DEFAULTS.cellSize;
+        maxWidth.value = DEFAULTS.maxWidth;
+        apiBase.value = DEFAULTS.apiBase;
+
+        dtfSafe.checked = DEFAULTS.dtfSafe;
+        dotGain.value = DEFAULTS.dotGain;
+        minDot.value = DEFAULTS.minDot;
+        alphaThreshold.value = DEFAULTS.alphaThreshold;
+        minCoverage.value = DEFAULTS.minCoverage;
+
+        syncLabels();
+        setStatus("");
+        setDebug("");
+      });
+
+      fileEl.addEventListener("change", () => {
+        const f = fileEl.files?.[0];
+        if (!f) return;
+
+        fileInfo.textContent = `${f.name} — ${f.type || "unknown"} — ${f.size.toLocaleString()} bytes`;
+        origPreview.src = URL.createObjectURL(f);
+
+        outPreview.removeAttribute("src");
+        dlBtn.disabled = true;
+        lastDownloadUrl = null;
+
+        setStatus("");
+        setDebug("");
+      });
 
       function setStatus(msg, kind="") {
         statusEl.className = kind === "err" ? "err" : (kind === "ok" ? "ok" : "");
         statusEl.textContent = msg;
       }
-      function setDebug(msg) { debugEl.textContent = msg; }
 
-      function normalizeBaseUrl(raw) {
-        return String(raw || "").trim().replace(/\/+$/, "");
+      function setDebug(msg) {
+        debugEl.textContent = msg;
       }
 
       async function jsonOrText(resp) {
         const ct = resp.headers.get("content-type") || "";
         if (ct.includes("application/json")) return resp.json();
         return resp.text();
+      }
+
+      function normalizeBaseUrl(raw) {
+        return String(raw || "").trim().replace(/\/+$/, "");
       }
 
       function friendlyNetworkError(err) {
@@ -257,54 +351,8 @@
         throw lastErr;
       }
 
-      function syncLabels() {
-        cellSizeVal.textContent = cellSize.value;
-        maxWidthVal.textContent = maxWidth.value;
-        dotGainVal.textContent = Number(dotGain.value).toFixed(2);
-        minDotVal.textContent = Number(minDot.value).toFixed(2);
-        alphaThresholdVal.textContent = alphaThreshold.value;
-        minCoverageVal.textContent = Number(minCoverage.value).toFixed(2);
-      }
-
-      [cellSize, maxWidth, dotGain, minDot, alphaThreshold, minCoverage].forEach(el => {
-        el.addEventListener("input", syncLabels);
-      });
+      // initial label sync
       syncLabels();
-
-      let lastDownloadUrl = null;
-
-      resetBtn.addEventListener("click", () => {
-        dotShape.value = DEFAULTS.dotShape;
-        cellSize.value = DEFAULTS.cellSize;
-        maxWidth.value = DEFAULTS.maxWidth;
-        apiBase.value = DEFAULTS.apiBase;
-
-        dtfSafe.checked = DEFAULTS.dtfSafe;
-        dotGain.value = DEFAULTS.dotGain;
-        minDot.value = DEFAULTS.minDot;
-        alphaThreshold.value = DEFAULTS.alphaThreshold;
-        minCoverage.value = DEFAULTS.minCoverage;
-
-        syncLabels();
-
-        setStatus("");
-        setDebug("");
-      });
-
-      fileEl.addEventListener("change", () => {
-        const f = fileEl.files?.[0];
-        if (!f) return;
-
-        fileInfo.textContent = `${f.name} — ${f.type || "unknown"} — ${f.size.toLocaleString()} bytes`;
-        origPreview.src = URL.createObjectURL(f);
-
-        outPreview.removeAttribute("src");
-        dlBtn.disabled = true;
-        lastDownloadUrl = null;
-
-        setStatus("");
-        setDebug("");
-      });
 
       goBtn.addEventListener("click", async () => {
         const f = fileEl.files?.[0];
@@ -315,6 +363,9 @@
 
         const base = normalizeBaseUrl(apiBase.value);
         if (!base.startsWith("http")) return setStatus("API base URL must start with http/https.", "err");
+
+        const cs = Number(cellSize.value);
+        const mw = Number(maxWidth.value);
 
         setStatus("Working…");
         setDebug("");
@@ -341,7 +392,7 @@
 
           const up = await upResp.json();
 
-          // 2) PUT to R2
+          // 2) PUT the file to R2
           const putResp = await fetchWithRetry(up.uploadUrl, {
             method: "PUT",
             headers: up.headers || { "Content-Type": f.type },
@@ -359,13 +410,14 @@
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               key: up.key,
-              cellSize: Number(cellSize.value),
-              maxWidth: Number(maxWidth.value),
+              cellSize: cs,
+              maxWidth: mw,
               dotShape: dotShape.value,
 
               dtfSafe: !!dtfSafe.checked,
               dotGain: Number(dotGain.value),
               minDot: Number(minDot.value),
+
               alphaThreshold: Number(alphaThreshold.value),
               minCoverage: Number(minCoverage.value)
             })
@@ -374,13 +426,19 @@
           if (!procResp.ok) {
             const body = await jsonOrText(procResp);
             if (procResp.status === 429) {
-              throw new Error("Processor busy (429). Wait ~5 seconds and click Generate again.\n\n" + JSON.stringify(body, null, 2));
+              throw new Error(
+                "Processor busy (429). Wait ~5 seconds and click Generate again.\n\n" +
+                JSON.stringify(body, null, 2)
+              );
             }
             throw new Error(`process failed (${procResp.status}): ${JSON.stringify(body, null, 2)}`);
           }
 
           const proc = await procResp.json();
-          if (!proc.downloadUrl) throw new Error(`process response missing downloadUrl: ${JSON.stringify(proc, null, 2)}`);
+
+          if (!proc.downloadUrl) {
+            throw new Error(`process response missing downloadUrl: ${JSON.stringify(proc, null, 2)}`);
+          }
 
           lastDownloadUrl = proc.downloadUrl;
           outPreview.src = proc.downloadUrl;
@@ -389,10 +447,12 @@
           setStatus("Done ✅", "ok");
 
           const perf = proc.perf
-            ? `\nms: ${proc.perf.ms}\ndots: ${proc.perf.emittedDots}\ncells: ${proc.perf.cellCount}\nout: ${proc.perf.outWidth}x${proc.perf.outHeight}`
+            ? `\nms: ${proc.perf.ms}\ncells: ${proc.perf.cellCount}\ndots: ${proc.perf.dotCount}\nout: ${proc.perf.outWidth}x${proc.perf.outHeight}`
             : "";
 
-          setDebug(`uploadKey: ${up.key}\noutputKey: ${proc.outputKey || "(not provided)"}${perf}`);
+          setDebug(
+            `uploadKey: ${up.key}\noutputKey: ${proc.outputKey || "(not provided)"}\nparams: ${JSON.stringify(proc.params || {}, null, 0)}${perf}`
+          );
         } catch (err) {
           setStatus(friendlyNetworkError(err), "err");
         } finally {

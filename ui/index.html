@@ -34,7 +34,7 @@
     <p class="muted" style="margin-top:0;">
       Uploads to Cloudflare R2, processes on Render, returns a downloadable PNG.
       <span class="pill">Tip: 12&quot; @ 300dpi = 3600px</span>
-      <span class="pill">DTF-safe output (prevents faint dots → unwanted white)</span>
+      <span class="pill">DTF-safe output (prevents faint pixels → unwanted white)</span>
     </p>
 
     <div class="row">
@@ -65,7 +65,7 @@
         <div class="toggleRow" style="margin-top:14px;">
           <div>
             <div style="font-weight:700;">DTF Safe Mode</div>
-            <div class="muted">Prevents faint dots that cause unwanted white underbase.</div>
+            <div class="muted">Prevents faint pixels that cause unwanted white underbase.</div>
           </div>
           <input id="dtfSafe" type="checkbox" checked />
         </div>
@@ -89,9 +89,10 @@
           <div class="grid2" style="margin-top:10px;">
             <div>
               <label>Alpha threshold: <span id="alphaThresholdVal">32</span></label>
-              <input id="alphaThreshold" type="range" min="0" max="200" step="1" value="32" />
+              <!-- IMPORTANT: min is 1 so we never treat alpha=0 pixels as “solid” -->
+              <input id="alphaThreshold" type="range" min="1" max="200" step="1" value="32" />
               <div class="muted">
-                Ignores pixels below this alpha when building dots. Higher = fewer faint edge dots.
+                Ignores pixels at/below this alpha when building dots. Higher = fewer faint edge pixels.
               </div>
             </div>
 
@@ -99,15 +100,15 @@
               <label>Min coverage: <span id="minCoverageVal">0.15</span></label>
               <input id="minCoverage" type="range" min="0.00" max="0.60" step="0.01" value="0.15" />
               <div class="muted">
-                A cell must have at least this % of “real” pixels (alpha ≥ threshold) to emit a dot.
+                A cell must have at least this % of “real” pixels (alpha &gt; threshold) to emit a dot.
               </div>
             </div>
           </div>
 
           <label style="margin-top:12px;">Alpha mode</label>
           <select id="alphaMode">
-            <option value="binary" selected>binary (DTF recommended — dot is fully opaque or absent)</option>
-            <option value="average">average (legacy-like — can create faint dots)</option>
+            <option value="binary" selected>binary (DTF recommended — fully opaque or absent)</option>
+            <option value="average">average (legacy-like — can create faint pixels)</option>
           </select>
         </details>
 
@@ -133,7 +134,7 @@
         <button id="download" style="margin-top:12px;" disabled>Download PNG</button>
 
         <div class="muted" style="margin-top:10px;">
-          Tip: If you see “white haze” in prints, keep DTF Safe Mode ON and increase Alpha threshold slightly.
+          If you ever see dots outside the artwork, increase Alpha threshold (try 40–60).
         </div>
       </div>
     </div>
@@ -169,7 +170,6 @@
       const alphaMode = $("alphaMode");
       const alphaThresholdVal = $("alphaThresholdVal");
       const minCoverageVal = $("minCoverageVal");
-      const advanced = $("advanced");
 
       const DEFAULTS = {
         dotShape: "circle",
@@ -194,12 +194,13 @@
 
       function applyDtfSafeUiState() {
         const on = dtfSafe.checked;
-
-        // If DTF safe is on, default to binary, and keep advanced visible but “guided”.
-        // We don't disable advanced controls because you said you don't mind more frontend changes
-        // and you may want to tune threshold/coverage.
         if (on) {
           alphaMode.value = "binary";
+          // alphaThreshold min is 1, but keep this guard anyway
+          if (Number(alphaThreshold.value) < 1) {
+            alphaThreshold.value = 1;
+            alphaThresholdVal.textContent = "1";
+          }
         }
       }
       dtfSafe.addEventListener("change", applyDtfSafeUiState);
@@ -301,7 +302,6 @@
         const base = normalizeBaseUrl(apiBase.value);
         if (!base.startsWith("http")) return setStatus("API base URL must start with http/https.", "err");
 
-        // UI guardrails (matches server-side clamping)
         const cs = Number(cellSize.value);
         const mw = Number(maxWidth.value);
 
@@ -312,7 +312,6 @@
         dlBtn.disabled = true;
 
         try {
-          // 1) get upload URL
           const upResp = await fetchWithRetry(`${base}/v1/halftone/upload-url`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -330,7 +329,6 @@
 
           const up = await upResp.json();
 
-          // 2) PUT the file to R2
           const putResp = await fetchWithRetry(up.uploadUrl, {
             method: "PUT",
             headers: up.headers || { "Content-Type": f.type },
@@ -342,7 +340,6 @@
             throw new Error(`R2 PUT failed (${putResp.status}): ${txt || "no body"}`);
           }
 
-          // 3) process
           const dtfOn = dtfSafe.checked;
 
           const payload = {
@@ -351,11 +348,9 @@
             maxWidth: mw,
             dotShape: dotShape.value,
 
-            // Darkness / coverage controls
             dotGain: Number(dotGain.value),
             minDot: Number(minDot.value),
 
-            // DTF controls
             alphaThreshold: Number(alphaThreshold.value),
             minCoverage: Number(minCoverage.value),
             alphaMode: dtfOn ? "binary" : alphaMode.value,

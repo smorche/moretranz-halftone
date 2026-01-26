@@ -7,46 +7,39 @@
     <style>
       body { font-family: Arial, sans-serif; max-width: 1120px; margin: 24px auto; padding: 0 16px; }
 
-      /* Desktop: 2 columns (settings left, preview right) */
       .layout {
         display: grid;
         grid-template-columns: minmax(360px, 1fr) 460px;
         gap: 16px;
         align-items: start;
       }
-
-      /* Mobile: stack */
-      @media (max-width: 980px) {
-        .layout { grid-template-columns: 1fr; }
-      }
+      @media (max-width: 980px) { .layout { grid-template-columns: 1fr; } }
 
       .card { border: 1px solid #ddd; border-radius: 12px; padding: 16px; background: #fff; }
 
-      /* Keep preview column from getting huge and keep it visible on scroll */
-      .previewCol {
-        position: sticky;
-        top: 16px;
-      }
-      @media (max-width: 980px) {
-        .previewCol { position: static; }
-      }
+      .previewCol { position: sticky; top: 16px; }
+      @media (max-width: 980px) { .previewCol { position: static; } }
 
       label { display:block; font-size: 14px; margin: 12px 0 6px; font-weight: 600; }
       input[type="range"] { width: 100%; }
-      select, input[type="file"], input[type="text"], button { width: 100%; padding: 10px; font-size: 14px; box-sizing: border-box; }
+      select, input[type="file"], input[type="text"], button {
+        width: 100%; padding: 10px; font-size: 14px; box-sizing: border-box;
+      }
       button { cursor: pointer; }
       button:disabled { opacity: .6; cursor: not-allowed; }
       .muted { color:#666; font-size: 12px; line-height: 1.35; }
       .ok { color: #0a7a0a; }
       .err { color: #b00020; white-space: pre-wrap; }
       .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; font-size: 12px; }
-
       .pill { display:inline-block; padding: 3px 8px; border: 1px solid #ddd; border-radius: 999px; font-size: 12px; color:#333; background:#fafafa; }
 
       .btnRow { display:flex; gap:10px; }
       .btnRow button { width: 100%; }
 
-      .toggleRow { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:10px 12px; border:1px solid #eee; border-radius:10px; background:#fafafa; }
+      .toggleRow {
+        display:flex; align-items:center; justify-content:space-between; gap:12px;
+        padding:10px 12px; border:1px solid #eee; border-radius:10px; background:#fafafa;
+      }
       .toggleRow input { width:auto; transform: scale(1.15); }
 
       details { margin-top: 12px; }
@@ -55,7 +48,6 @@
       .grid2 { display:grid; grid-template-columns: 1fr 1fr; gap:12px; }
       @media (max-width: 720px) { .grid2 { grid-template-columns: 1fr; } }
 
-      /* Preview images: keep within preview column and avoid giant height */
       .imgBox {
         border: 1px solid #eee;
         border-radius: 10px;
@@ -70,9 +62,7 @@
         object-fit: contain;
         border-radius: 8px;
       }
-      @media (max-width: 980px) {
-        img { max-height: 420px; }
-      }
+      @media (max-width: 980px) { img { max-height: 420px; } }
     </style>
   </head>
   <body>
@@ -111,15 +101,15 @@
         <div class="toggleRow" style="margin-top:14px;">
           <div>
             <div style="font-weight:700;">DTF Safe Mode</div>
-            <div class="muted">Kills faint pixels that cause unwanted white underbase.</div>
+            <div class="muted">Stops faint pixels (unwanted white underbase).</div>
           </div>
           <input id="dtfSafe" type="checkbox" checked />
         </div>
 
         <div class="grid2" style="margin-top:10px;">
           <div>
-            <label>Darkness (dot gain): <span id="dotGainVal">1.25</span></label>
-            <input id="dotGain" type="range" min="0.80" max="1.80" step="0.05" value="1.25" />
+            <label>Darkness (dot gain): <span id="dotGainVal">1.35</span></label>
+            <input id="dotGain" type="range" min="0.80" max="1.80" step="0.05" value="1.35" />
             <div class="muted">Higher = darker (more dot coverage).</div>
           </div>
           <div>
@@ -134,9 +124,9 @@
 
           <div class="grid2" style="margin-top:10px;">
             <div>
-              <label>Alpha threshold: <span id="alphaThresholdVal">48</span></label>
+              <label>Alpha threshold (sampling): <span id="alphaThresholdVal">48</span></label>
               <input id="alphaThreshold" type="range" min="1" max="200" step="1" value="48" />
-              <div class="muted">Higher = fewer dots in “empty” areas (kills alpha noise).</div>
+              <div class="muted">Ignores pixels below this alpha when building dots.</div>
             </div>
 
             <div>
@@ -146,11 +136,22 @@
             </div>
           </div>
 
-          <label style="margin-top:12px;">Alpha mode</label>
-          <select id="alphaMode">
-            <option value="binary" selected>binary (DTF recommended)</option>
-            <option value="average">average (can create faint pixels)</option>
-          </select>
+          <div class="grid2" style="margin-top:10px;">
+            <div>
+              <label>Output alpha cutoff (DTF): <span id="alphaHardenVal">16</span></label>
+              <input id="alphaHarden" type="range" min="1" max="200" step="1" value="16" />
+              <div class="muted">Prevents tiny alpha noise from becoming opaque in binary mode.</div>
+            </div>
+
+            <div>
+              <label>Alpha mode</label>
+              <select id="alphaMode">
+                <option value="binary" selected>binary (DTF recommended)</option>
+                <option value="average">average (can create faint pixels)</option>
+              </select>
+              <div class="muted">DTF Safe Mode forces binary.</div>
+            </div>
+          </div>
         </details>
 
         <label style="margin-top:14px;">API base URL</label>
@@ -169,21 +170,18 @@
         <h3 style="margin-top:0;">Preview</h3>
 
         <div class="muted">Original</div>
-        <div class="imgBox">
-          <img id="origPreview" alt="" />
-        </div>
+        <div class="imgBox"><img id="origPreview" alt="" /></div>
 
         <div style="height:12px;"></div>
 
         <div class="muted">Halftone output</div>
-        <div class="imgBox">
-          <img id="outPreview" alt="" />
-        </div>
+        <div class="imgBox"><img id="outPreview" alt="" /></div>
 
         <button id="download" style="margin-top:12px;" disabled>Download PNG</button>
 
         <div class="muted" style="margin-top:10px;">
-          If you see dots outside the artwork: raise <b>Alpha threshold</b> (try 60–90) or raise <b>Min coverage</b>.
+          If output looks “blocky/opaque”: raise <b>Output alpha cutoff</b> (try 24–40).
+          If you see dots outside art: raise <b>Alpha threshold</b> or <b>Min coverage</b>.
         </div>
       </div>
     </div>
@@ -217,8 +215,11 @@
       const alphaThreshold = $("alphaThreshold");
       const minCoverage = $("minCoverage");
       const alphaMode = $("alphaMode");
+      const alphaHarden = $("alphaHarden");
+
       const alphaThresholdVal = $("alphaThresholdVal");
       const minCoverageVal = $("minCoverageVal");
+      const alphaHardenVal = $("alphaHardenVal");
 
       const DEFAULTS = {
         dotShape: "circle",
@@ -227,11 +228,12 @@
         apiBase: "https://moretranz-halftone.onrender.com",
 
         dtfSafe: true,
-        dotGain: 1.25,
+        dotGain: 1.35,
         minDot: 0.18,
         alphaThreshold: 48,
         minCoverage: 0.20,
         alphaMode: "binary",
+        alphaHarden: 16,
       };
 
       cellSize.addEventListener("input", () => (cellSizeVal.textContent = cellSize.value));
@@ -240,6 +242,7 @@
       minDot.addEventListener("input", () => (minDotVal.textContent = minDot.value));
       alphaThreshold.addEventListener("input", () => (alphaThresholdVal.textContent = alphaThreshold.value));
       minCoverage.addEventListener("input", () => (minCoverageVal.textContent = Number(minCoverage.value).toFixed(2)));
+      alphaHarden.addEventListener("input", () => (alphaHardenVal.textContent = alphaHarden.value));
 
       function setStatus(msg, kind="") {
         statusEl.className = kind === "err" ? "err" : (kind === "ok" ? "ok" : "");
@@ -312,6 +315,7 @@
         alphaThreshold.value = DEFAULTS.alphaThreshold;
         minCoverage.value = DEFAULTS.minCoverage;
         alphaMode.value = DEFAULTS.alphaMode;
+        alphaHarden.value = DEFAULTS.alphaHarden;
 
         cellSizeVal.textContent = DEFAULTS.cellSize;
         maxWidthVal.textContent = DEFAULTS.maxWidth;
@@ -319,6 +323,7 @@
         minDotVal.textContent = DEFAULTS.minDot;
         alphaThresholdVal.textContent = DEFAULTS.alphaThreshold;
         minCoverageVal.textContent = Number(DEFAULTS.minCoverage).toFixed(2);
+        alphaHardenVal.textContent = DEFAULTS.alphaHarden;
 
         setStatus("");
         setDebug("");
@@ -334,9 +339,6 @@
         const base = normalizeBaseUrl(apiBase.value);
         if (!base.startsWith("http")) return setStatus("API base URL must start with http/https.", "err");
 
-        const cs = Number(cellSize.value);
-        const mw = Number(maxWidth.value);
-
         setStatus("Working…");
         setDebug("");
         goBtn.disabled = true;
@@ -344,7 +346,7 @@
         dlBtn.disabled = true;
 
         try {
-          // 1) upload url
+          // 1) get upload URL
           const upResp = await fetchWithRetry(`${base}/v1/halftone/upload-url`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -373,13 +375,13 @@
             throw new Error(`R2 PUT failed (${putResp.status}): ${txt || "no body"}`);
           }
 
-          // 3) process
           const dtfOn = dtfSafe.checked;
 
+          // 3) process
           const payload = {
             key: up.key,
-            cellSize: cs,
-            maxWidth: mw,
+            cellSize: Number(cellSize.value),
+            maxWidth: Number(maxWidth.value),
             dotShape: dotShape.value,
 
             dotGain: Number(dotGain.value),
@@ -387,7 +389,9 @@
 
             alphaThreshold: Number(alphaThreshold.value),
             minCoverage: Number(minCoverage.value),
+
             alphaMode: dtfOn ? "binary" : alphaMode.value,
+            alphaHarden: Number(alphaHarden.value),
           };
 
           const procResp = await fetchWithRetry(`${base}/v1/halftone/process`, {
@@ -448,6 +452,7 @@
       minDotVal.textContent = minDot.value;
       alphaThresholdVal.textContent = alphaThreshold.value;
       minCoverageVal.textContent = Number(minCoverage.value).toFixed(2);
+      alphaHardenVal.textContent = alphaHarden.value;
     </script>
   </body>
 </html>

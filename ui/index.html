@@ -5,31 +5,40 @@
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <title>MoreTranz Halftone Tool</title>
     <style>
-      body { font-family: Arial, sans-serif; max-width: 820px; margin: 24px auto; padding: 0 16px; }
-      .row { display: flex; gap: 16px; flex-wrap: wrap; }
-      .card { border: 1px solid #ddd; border-radius: 10px; padding: 16px; }
+      body { font-family: Arial, sans-serif; max-width: 920px; margin: 24px auto; padding: 0 16px; }
+      .row { display: flex; gap: 16px; flex-wrap: wrap; align-items: flex-start; }
+      .card { border: 1px solid #ddd; border-radius: 10px; padding: 16px; background: #fff; }
       label { display:block; font-size: 14px; margin: 12px 0 6px; }
       input[type="range"] { width: 100%; }
-      select, input[type="file"], button { width: 100%; padding: 10px; font-size: 14px; }
+      select, input[type="file"], input[type="text"], button { width: 100%; padding: 10px; font-size: 14px; box-sizing: border-box; }
       button { cursor: pointer; }
-      .muted { color:#666; font-size: 12px; }
-      img { max-width: 100%; border: 1px solid #eee; border-radius: 8px; }
+      .muted { color:#666; font-size: 12px; line-height: 1.4; }
+      img { max-width: 100%; border: 1px solid #eee; border-radius: 8px; background: repeating-conic-gradient(#f6f6f6 0% 25%, #ffffff 0% 50%) 50%/20px 20px; }
       .ok { color: #0a7a0a; }
       .err { color: #b00020; white-space: pre-wrap; }
       .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; font-size: 12px; }
+      .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+      .pill { display:inline-block; padding: 3px 8px; border: 1px solid #ddd; border-radius: 999px; font-size: 12px; color:#333; background:#fafafa; }
+      .smallbtn { padding: 8px 10px; font-size: 13px; }
+      .hr { height: 1px; background: #eee; margin: 14px 0; }
     </style>
   </head>
   <body>
     <h1>MoreTranz Halftone Tool</h1>
-    <p class="muted">Uploads to Cloudflare R2, processes on Render, returns a downloadable PNG.</p>
+    <p class="muted">
+      Uploads to Cloudflare R2, processes on Render, returns a downloadable PNG.
+      <span class="pill">Tip: 12&quot; @ 300dpi = 3600px</span>
+    </p>
 
     <div class="row">
-      <div class="card" style="flex: 1 1 340px;">
+      <div class="card" style="flex: 1 1 360px;">
         <h3>1) Choose image</h3>
         <input id="file" type="file" accept="image/png,image/jpeg,image/webp" />
         <div id="fileInfo" class="muted"></div>
 
-        <h3 style="margin-top:18px;">2) Settings</h3>
+        <div class="hr"></div>
+
+        <h3>2) Settings</h3>
 
         <label>Dot shape</label>
         <select id="dotShape">
@@ -42,20 +51,29 @@
         <input id="cellSize" type="range" min="8" max="30" step="1" value="12" />
         <div class="muted">Smaller = more detail but more CPU.</div>
 
-        <label>Max width: <span id="maxWidthVal">2000</span> px</label>
-        <input id="maxWidth" type="range" min="500" max="3600" step="50" value="2000" />
-        <div class="muted">Lower this if performance is slow.</div>
+        <label>Max width: <span id="maxWidthVal">3600</span> px</label>
+        <input id="maxWidth" type="range" min="500" max="3600" step="50" value="3600" />
+        <div class="muted">Lower this if performance is slow. For 12&quot; @ 300dpi, use 3600.</div>
+
+        <label>Strength: <span id="strengthVal">60</span></label>
+        <input id="strength" type="range" min="0" max="100" step="1" value="60" />
+        <div class="muted">
+          0 = lighter effect, 100 = stronger effect (more contrast / more dots).
+        </div>
 
         <label style="margin-top:14px;">API base URL</label>
         <input id="apiBase" class="mono" value="https://moretranz-halftone.onrender.com" />
 
-        <button id="go" style="margin-top:14px;">Generate Halftone</button>
+        <div class="grid2" style="margin-top:12px;">
+          <button id="go">Generate Halftone</button>
+          <button id="reset" class="smallbtn" type="button">Reset defaults</button>
+        </div>
 
         <div id="status" style="margin-top:12px;"></div>
         <div id="debug" class="mono muted" style="margin-top:10px;"></div>
       </div>
 
-      <div class="card" style="flex: 1 1 340px;">
+      <div class="card" style="flex: 1 1 420px;">
         <h3>Preview</h3>
         <div class="muted">Original</div>
         <img id="origPreview" alt="" />
@@ -76,16 +94,54 @@
       const statusEl = $("status");
       const debugEl = $("debug");
       const goBtn = $("go");
+      const resetBtn = $("reset");
       const dlBtn = $("download");
+
       const apiBase = $("apiBase");
       const cellSize = $("cellSize");
       const maxWidth = $("maxWidth");
       const dotShape = $("dotShape");
+      const strength = $("strength");
+
       const cellSizeVal = $("cellSizeVal");
       const maxWidthVal = $("maxWidthVal");
+      const strengthVal = $("strengthVal");
 
-      cellSize.addEventListener("input", () => (cellSizeVal.textContent = cellSize.value));
-      maxWidth.addEventListener("input", () => (maxWidthVal.textContent = maxWidth.value));
+      // Defaults (match UI)
+      const DEFAULTS = {
+        dotShape: "circle",
+        cellSize: 12,
+        maxWidth: 3600,
+        strength: 60,
+        apiBase: "https://moretranz-halftone.onrender.com",
+      };
+
+      function setStatus(msg, kind="") {
+        statusEl.className = kind === "err" ? "err" : (kind === "ok" ? "ok" : "");
+        statusEl.textContent = msg;
+      }
+      function setDebug(msg) {
+        debugEl.textContent = msg;
+      }
+
+      function syncLabels() {
+        cellSizeVal.textContent = cellSize.value;
+        maxWidthVal.textContent = maxWidth.value;
+        strengthVal.textContent = strength.value;
+      }
+
+      function resetDefaults() {
+        dotShape.value = DEFAULTS.dotShape;
+        cellSize.value = DEFAULTS.cellSize;
+        maxWidth.value = DEFAULTS.maxWidth;
+        strength.value = DEFAULTS.strength;
+        apiBase.value = DEFAULTS.apiBase;
+        syncLabels();
+      }
+
+      cellSize.addEventListener("input", syncLabels);
+      maxWidth.addEventListener("input", syncLabels);
+      strength.addEventListener("input", syncLabels);
 
       let lastDownloadUrl = null;
 
@@ -100,14 +156,6 @@
         setStatus("");
         setDebug("");
       });
-
-      function setStatus(msg, kind="") {
-        statusEl.className = kind === "err" ? "err" : (kind === "ok" ? "ok" : "");
-        statusEl.textContent = msg;
-      }
-      function setDebug(msg) {
-        debugEl.textContent = msg;
-      }
 
       async function jsonOrText(resp) {
         const ct = resp.headers.get("content-type") || "";
@@ -161,16 +209,18 @@
           }
 
           // 3) process
+          const payload = {
+            key: up.key,
+            cellSize: Number(cellSize.value),
+            maxWidth: Number(maxWidth.value),
+            dotShape: dotShape.value,
+            strength: Number(strength.value)
+          };
+
           const procResp = await fetch(`${base}/v1/halftone/process`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              key: up.key,
-              cellSize: Number(cellSize.value),
-              maxWidth: Number(maxWidth.value),
-              dotShape: dotShape.value
-              strength: 60
-            })
+            body: JSON.stringify(payload)
           });
 
           if (!procResp.ok) {
@@ -189,7 +239,11 @@
           dlBtn.disabled = false;
 
           setStatus("Done ✅", "ok");
-          setDebug(`uploadKey: ${up.key}\noutputKey: ${proc.outputKey || "(not provided)"}`);
+          setDebug(
+            `uploadKey: ${up.key}\n` +
+            `outputKey: ${proc.outputKey || "(not provided)"}\n` +
+            `params: ${JSON.stringify(proc.params || payload, null, 2)}`
+          );
         } catch (err) {
           setStatus(String(err?.message || err), "err");
         } finally {
@@ -199,7 +253,6 @@
 
       dlBtn.addEventListener("click", async () => {
         if (!lastDownloadUrl) return;
-        // Force download by fetching blob and creating an object URL
         const resp = await fetch(lastDownloadUrl);
         const blob = await resp.blob();
         const a = document.createElement("a");
@@ -209,6 +262,16 @@
         a.click();
         a.remove();
       });
+
+      resetBtn.addEventListener("click", () => {
+        resetDefaults();
+        setStatus("Defaults reset.", "ok");
+        setTimeout(() => setStatus(""), 1200);
+      });
+
+      // Init
+      resetDefaults();
+      syncLabels();
     </script>
   </body>
 </html>

@@ -27,26 +27,16 @@ for (const k of requiredEnv) {
   }
 }
 
-// Upload bytes: keep at 25MB unless you explicitly raise it.
-// 12" @ 300dpi PNG can easily be several MB to tens of MB depending on complexity.
 const MAX_UPLOAD_BYTES = Number(process.env.MAX_UPLOAD_BYTES || 25 * 1024 * 1024);
-
-// Pixel guard: 12" @ 300dpi = 3600 px wide. Height varies.
-// A “12x12 @ 300dpi” would be 3600*3600 = 12.96MP, which is fine.
-// 50MP default is conservative but safe; you can bump if needed.
 const MAX_IMAGE_PIXELS = Number(process.env.MAX_IMAGE_PIXELS || 50_000_000);
 
-// Halftone limits
-const HARD_MAX_WIDTH = Number(process.env.HARD_MAX_WIDTH || 3600); // supports 12"@300dpi width
-const SOFT_MAX_WIDTH = Number(process.env.SOFT_MAX_WIDTH || 3200); // warns above this
+const HARD_MAX_WIDTH = Number(process.env.HARD_MAX_WIDTH || 3600);
+const SOFT_MAX_WIDTH = Number(process.env.SOFT_MAX_WIDTH || 3200);
 const MIN_CELL = Number(process.env.MIN_CELL || 8);
 const MAX_CELL = Number(process.env.MAX_CELL || 30);
 
-// Concurrency guard: keep at 1 to avoid stacked peak memory spikes
 const MAX_CONCURRENT_JOBS = Number(process.env.MAX_CONCURRENT_JOBS || 1);
-
-// Optional: reject super heavy requests by estimate (safety)
-const MAX_CELLS_ESTIMATE = Number(process.env.MAX_CELLS_ESTIMATE || 700_000); // conservative
+const MAX_CELLS_ESTIMATE = Number(process.env.MAX_CELLS_ESTIMATE || 700_000);
 
 function clamp(n, min, max) {
   return Math.max(min, Math.min(max, n));
@@ -90,7 +80,7 @@ const ALLOWED_ORIGINS = new Set([
 app.use(
   cors({
     origin: (origin, cb) => {
-      if (!origin) return cb(null, true); // server-to-server/curl
+      if (!origin) return cb(null, true);
       if (ALLOWED_ORIGINS.has(origin)) return cb(null, true);
       return cb(new Error(`CORS blocked for origin: ${origin}`));
     },
@@ -104,7 +94,7 @@ app.use(
  *  S3 (Cloudflare R2)
  *  --------------------------*/
 const s3 = new S3Client({
-  region: process.env.R2_REGION, // often "auto"
+  region: process.env.R2_REGION,
   endpoint: process.env.R2_ENDPOINT,
   credentials: {
     accessKeyId: process.env.R2_ACCESS_KEY_ID,
@@ -131,18 +121,27 @@ function tooBusyResponse(res) {
 }
 
 /**
- * Full-color halftone (RGBA-safe):
- * - sample average RGBA in each cell
- * - dot color = sampled RGB
- * - dot opacity = sampled alpha
- * - dot radius = based on luminance (darker -> larger dot)
- * - output is transparent PNG
- *
- * Memory notes:
- * - Build shapes using an array (less string churn)
- * - Avoid creating huge intermediate buffers unnecessarily
+ * Full-color halftone (RGBA-safe) tuned for DTF:
+ * - Sample average RGB from ONLY "solid" pixels (alpha >= threshold)
+ * - Skip cells that are mostly faint/edge pixels (coverage < minCoverage)
+ * - For DTF, default alphaMode=binary so dots are either fully opaque or absent
+ *   (prevents faint dots from triggering unwanted white underbase)
+ * - Dot size is based on luminance with dotGain curve + minDot floor
  */
-async function makeColorHalftonePng(inputBuffer, { cellSize, maxWidth, dotShape }) {
+async function makeColorHalftonePng(inputBuffer, {
+  cellSize,
+  maxWidth,
+  dotShape,
+
+  // Darkness controls
+  dotGain,
+  minDot,
+
+  // DTF controls
+  alphaThreshold,
+  minCoverage,
+  alphaMode
+}) {
   const base = sharp(inputBuffer, { failOn: "none" });
 
   const meta = await base.metadata();
@@ -153,10 +152,8 @@ async function makeColorHalftonePng(inputBuffer, { cellSize, maxWidth, dotShape 
     throw new Error(`Image too large: ${pixels} pixels exceeds limit ${MAX_IMAGE_PIXELS}`);
   }
 
-  // Clamp maxWidth to supported range (12"@300dpi => 3600px)
   const targetW = clamp(Math.min(meta.width, maxWidth), 256, HARD_MAX_WIDTH);
 
-  // Resize down to targetW (keep aspect)
   const resized = base.resize({ width: targetW, withoutEnlargement: true });
 
   const rMeta = await resized.metadata();
@@ -164,7 +161,6 @@ async function makeColorHalftonePng(inputBuffer, { cellSize, maxWidth, dotShape 
   const h = rMeta.height;
   if (!w || !h) throw new Error("Could not read resized dimensions");
 
-  // Estimate workload & optionally reject insane combos (safety)
   const cs = clamp(Math.floor(cellSize), MIN_CELL, MAX_CELL);
   const cols = Math.ceil(w / cs);
   const rows = Math.ceil(h / cs);
@@ -176,13 +172,20 @@ async function makeColorHalftonePng(inputBuffer, { cellSize, maxWidth, dotShape 
     );
   }
 
-  // Get raw RGBA pixels
   const { data } = await resized.ensureAlpha().raw().toBuffer({ resolveWithObject: true });
 
   const half = cs / 2;
   const shapes = [];
 
-  // Build dots
+  const aThresh = clamp(Math.floor(alphaThreshold), 0, 255);
+  const covMin = clamp(Number(minCoverage), 0, 1);
+
+  // dotGain: >1 = darker midtones, <1 = lighter
+  const dg = clamp(Number(dotGain), 0.6, 2.0);
+
+  // minDot is fraction of half-cell (0..0.6 recommended)
+  const minFrac = clamp(Number(minDot), 0, 0.6);
+
   for (let row = 0; row < rows; row++) {
     const y0 = row * cs;
     const y1 = Math.min(y0 + cs, h);
@@ -191,47 +194,73 @@ async function makeColorHalftonePng(inputBuffer, { cellSize, maxWidth, dotShape 
       const x0 = col * cs;
       const x1 = Math.min(x0 + cs, w);
 
-      // Average RGBA in the cell (box average)
-      let rSum = 0, gSum = 0, bSum = 0, aSum = 0, count = 0;
+      let rSum = 0, gSum = 0, bSum = 0;
+      let aSum = 0;
+      let solidCount = 0;
+      let totalCount = 0;
 
       for (let y = y0; y < y1; y++) {
         const rowBase = (y * w) * 4;
         for (let x = x0; x < x1; x++) {
           const idx = rowBase + x * 4;
-          rSum += data[idx];
-          gSum += data[idx + 1];
-          bSum += data[idx + 2];
-          aSum += data[idx + 3];
-          count++;
+          const aPx = data[idx + 3];
+          totalCount++;
+
+          // Only treat pixels above threshold as "real" ink pixels
+          if (aPx >= aThresh) {
+            rSum += data[idx];
+            gSum += data[idx + 1];
+            bSum += data[idx + 2];
+            aSum += aPx;
+            solidCount++;
+          }
         }
       }
 
-      if (!count) continue;
+      if (!totalCount) continue;
+      if (solidCount <= 0) continue;
 
-      const r = Math.round(rSum / count);
-      const g = Math.round(gSum / count);
-      const b = Math.round(bSum / count);
-      const a = Math.round(aSum / count);
+      const coverage = solidCount / totalCount;
 
-      // Skip fully transparent cells (keeps “shape-only” PNGs intact)
-      if (a <= 0) continue;
+      // If this cell is mostly faint edge pixels, skip it.
+      // This is the key for preventing DTF white haze/halo.
+      if (coverage < covMin) continue;
+
+      const r = Math.round(rSum / solidCount);
+      const g = Math.round(gSum / solidCount);
+      const b = Math.round(bSum / solidCount);
+
+      // Determine alpha of the dot
+      let outAlpha;
+      if (alphaMode === "average") {
+        outAlpha = Math.round(aSum / solidCount);
+      } else {
+        // binary (DTF recommended)
+        outAlpha = 255;
+      }
+
+      // If somehow ends up zero, skip
+      if (outAlpha <= 0) continue;
 
       const lum = luminance255(r, g, b);
-      const darkness = 1 - lum / 255;
+      let darkness = 1 - lum / 255;
 
-      // Dot size: keep a floor so light areas still have some dots,
-      // but not so large it fills everything.
-      // This is the main "look" knob.
-      const radius = clamp(half * (0.12 + 0.98 * darkness), 0, half);
+      // Dot gain curve: dg>1 boosts midtones/shadows (darker)
+      // We use exponent 1/dg to increase darkness when dg>1.
+      darkness = Math.pow(darkness, 1 / dg);
 
-      // Skip ultra tiny dots
-      if (radius < 0.35) continue;
+      // Convert to radius fraction with a minimum dot floor
+      const frac = clamp(minFrac + (1 - minFrac) * darkness, 0, 1);
+      const radius = half * frac;
+
+      // Skip only truly tiny dots (keep low so highlights still print if minDot>0)
+      if (radius < 0.15) continue;
 
       const cx = x0 + (x1 - x0) / 2;
       const cy = y0 + (y1 - y0) / 2;
 
       const fill = `rgb(${r},${g},${b})`;
-      const fillOpacity = (a / 255).toFixed(4);
+      const fillOpacity = (outAlpha / 255).toFixed(4);
 
       if (dotShape === "square") {
         const size = radius * 2;
@@ -264,7 +293,6 @@ async function makeColorHalftonePng(inputBuffer, { cellSize, maxWidth, dotShape 
   ${shapes.join("")}
 </svg>`;
 
-  // Render SVG -> PNG (transparent)
   const out = await sharp(Buffer.from(svg))
     .png({ compressionLevel: 9, adaptiveFiltering: true })
     .toBuffer();
@@ -324,13 +352,18 @@ app.post("/v1/halftone/upload-url", async (req, res) => {
 const ProcessRequest = z.object({
   key: z.string().min(1),
 
-  // UI default 12; we allow 8..30 here to reduce CPU + memory risk
   cellSize: z.number().int().min(MIN_CELL).max(MAX_CELL).default(12),
-
-  // UI can request up to 3600 for 12"@300dpi; server clamps to HARD_MAX_WIDTH
   maxWidth: z.number().int().min(256).max(4000).default(2000),
-
   dotShape: z.enum(["circle", "square", "ellipse"]).default("circle"),
+
+  // Darkness controls
+  dotGain: z.number().min(0.6).max(2.0).default(1.25),
+  minDot: z.number().min(0.0).max(0.6).default(0.18),
+
+  // DTF controls
+  alphaThreshold: z.number().int().min(0).max(255).default(32),
+  minCoverage: z.number().min(0).max(1).default(0.15),
+  alphaMode: z.enum(["binary", "average"]).default("binary"),
 });
 
 app.post("/v1/halftone/process", async (req, res) => {
@@ -347,9 +380,18 @@ app.post("/v1/halftone/process", async (req, res) => {
 
   ACTIVE_JOBS++;
 
-  const { key, cellSize, maxWidth, dotShape } = parsed.data;
+  const {
+    key,
+    cellSize,
+    maxWidth,
+    dotShape,
+    dotGain,
+    minDot,
+    alphaThreshold,
+    minCoverage,
+    alphaMode
+  } = parsed.data;
 
-  // Clamp maxWidth server-side, regardless of what UI sends
   const maxWidthClamped = clamp(maxWidth, 256, HARD_MAX_WIDTH);
 
   try {
@@ -359,9 +401,18 @@ app.post("/v1/halftone/process", async (req, res) => {
       logWithReq(req, "HIGH MEMORY REQUEST (soft warning)", { maxWidth: maxWidthClamped, cellSize, dotShape });
     }
 
-    logWithReq(req, "PROCESS PARAMS", { key, cellSize, maxWidth: maxWidthClamped, dotShape });
+    logWithReq(req, "PROCESS PARAMS", {
+      key,
+      cellSize,
+      maxWidth: maxWidthClamped,
+      dotShape,
+      dotGain,
+      minDot,
+      alphaThreshold,
+      minCoverage,
+      alphaMode
+    });
 
-    // HeadObject (optional)
     try {
       const head = await s3.send(new HeadObjectCommand({ Bucket: process.env.R2_BUCKET, Key: key }));
       if (typeof head.ContentLength === "number" && head.ContentLength > MAX_UPLOAD_BYTES) {
@@ -371,7 +422,6 @@ app.post("/v1/halftone/process", async (req, res) => {
       logWithReq(req, "HeadObject warning:", String(e?.name || e));
     }
 
-    // GetObject
     const obj = await s3.send(new GetObjectCommand({ Bucket: process.env.R2_BUCKET, Key: key }));
     if (!obj.Body) return res.status(404).json(errJson("NOT_FOUND", "Input object not found"));
 
@@ -382,7 +432,6 @@ app.post("/v1/halftone/process", async (req, res) => {
       return res.status(413).json(errJson("TOO_LARGE", `File exceeds max upload size (${MAX_UPLOAD_BYTES} bytes)`));
     }
 
-    // Validate image
     let meta;
     try {
       meta = await sharp(inputBuffer, { failOn: "none" }).metadata();
@@ -407,14 +456,19 @@ app.post("/v1/halftone/process", async (req, res) => {
       );
     }
 
-    // Process
     const { png, width, height, cellCount } = await makeColorHalftonePng(inputBuffer, {
       cellSize,
       maxWidth: maxWidthClamped,
-      dotShape
+      dotShape,
+
+      dotGain,
+      minDot,
+
+      alphaThreshold,
+      minCoverage,
+      alphaMode
     });
 
-    // Store output
     const outId = `ht_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
     const outputKey = `outputs/${outId}.png`;
 
@@ -442,7 +496,16 @@ app.post("/v1/halftone/process", async (req, res) => {
       outputKey,
       format: "png",
       transparent: true,
-      params: { cellSize, maxWidth: maxWidthClamped, dotShape },
+      params: {
+        cellSize,
+        maxWidth: maxWidthClamped,
+        dotShape,
+        dotGain,
+        minDot,
+        alphaThreshold,
+        minCoverage,
+        alphaMode
+      },
       perf: { ms, cellCount, outWidth: width, outHeight: height },
       downloadUrl
     });
@@ -450,7 +513,7 @@ app.post("/v1/halftone/process", async (req, res) => {
     console.error(`[${req._rid}] HALFTONE ERROR:`, e);
     return res.status(500).json(errJson("INTERNAL", "Failed to process halftone"));
   } finally {
-    ACTIVE_JOBS--;
+    ACTIVE_JOBS = Math.max(0, ACTIVE_JOBS - 1);
   }
 });
 

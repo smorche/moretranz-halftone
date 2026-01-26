@@ -142,9 +142,6 @@ async function renderSvgToPng({ width, height, svgBuffer }) {
     .toBuffer();
 }
 
-/**
- * Compute basic alpha stats (for logs).
- */
 function alphaStats(rgba) {
   let nonZero = 0;
   let ge48 = 0;
@@ -170,10 +167,10 @@ function alphaStats(rgba) {
 }
 
 /**
- * Full-color halftone (RGBA-safe) with DTF-safe binary alpha option:
- * - sample average RGB within alpha-qualified pixels in each cell
- * - dot radius based on luminance, with dotGain/minDot controls
- * - binary alpha is produced from a dot mask rendered to PNG, then thresholded
+ * Full-color halftone with DTF-safe binary alpha:
+ * - sampling only from "real pixels" (alphaThreshold)
+ * - emitting dots only if cell has enough real coverage (minCoverage)
+ * - binary mask is built from dot luminance and joined as a TRUE 1-channel alpha
  */
 async function makeColorHalftonePng(inputBuffer, opts) {
   const {
@@ -288,8 +285,6 @@ async function makeColorHalftonePng(inputBuffer, opts) {
       const cy = y0 + (y1 - y0) / 2;
 
       const fill = `rgb(${r},${g},${b})`;
-
-      // In average mode, opacity follows coverage; in binary mode alpha comes from mask.
       const fillOpacity = alphaMode === "average" ? clamp(coverage, 0, 1).toFixed(4) : "1";
 
       if (dotShape === "square") {
@@ -340,6 +335,7 @@ async function makeColorHalftonePng(inputBuffer, opts) {
     height: h,
     svgBuffer: Buffer.from(colorSvg),
   });
+
   const maskPng = await renderSvgToPng({
     width: w,
     height: h,
@@ -348,23 +344,30 @@ async function makeColorHalftonePng(inputBuffer, opts) {
 
   if (alphaMode === "binary") {
     /**
-     * ✅ Critical fix:
-     * Build the binary mask from dot luminance, not mask alpha.
-     * This prevents tiny background alpha noise from becoming fully opaque
-     * (which caused the “dark rectangle”).
+     * ✅ FIX:
+     * Build a TRUE single-channel alpha mask (raw 1-channel),
+     * then join it as alpha. This prevents the full-rectangle artifact.
      */
-    const alphaBin = await sharp(maskPng)
+    const alphaRaw = await sharp(maskPng)
       .ensureAlpha()
       .removeAlpha()
       .greyscale()
-      .threshold(12) // << safer than alpha threshold(1)
-      .png()
+      .threshold(12) // adjust to 20 if you ever see stray dots/noise
+      .raw()
       .toBuffer();
 
-    const rgb = await sharp(colorPng).ensureAlpha().removeAlpha().png().toBuffer();
-    const hardened = await sharp(rgb).joinChannel(alphaBin).png().toBuffer();
+    const rgbRaw = await sharp(colorPng)
+      .ensureAlpha()
+      .removeAlpha()
+      .raw()
+      .toBuffer();
 
-    return { png: hardened, width: w, height: h, cellCount };
+    const out = await sharp(rgbRaw, { raw: { width: w, height: h, channels: 3 } })
+      .joinChannel(alphaRaw, { raw: { width: w, height: h, channels: 1 } })
+      .png({ compressionLevel: 9, adaptiveFiltering: true })
+      .toBuffer();
+
+    return { png: out, width: w, height: h, cellCount };
   }
 
   return { png: colorPng, width: w, height: h, cellCount };
@@ -403,7 +406,6 @@ app.post("/v1/halftone/upload-url", async (req, res) => {
     });
 
     const uploadUrl = await getSignedUrl(s3, cmd, { expiresIn: 600 });
-
     logWithReq(req, "ISSUED UPLOAD URL", { key, contentType, contentLength });
 
     return res.json({
@@ -429,8 +431,6 @@ const ProcessRequest = z.object({
   dotGain: z.number().min(0.6).max(2.0).default(1.35),
   minDot: z.number().min(0.0).max(0.6).default(0.18),
 
-  // For your test PNG, lower thresholds are fine because background is truly transparent.
-  // Keep user-adjustable for customer variability.
   alphaThreshold: z.number().int().min(1).max(255).default(48),
   minCoverage: z.number().min(0).max(1).default(0.20),
 

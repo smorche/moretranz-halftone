@@ -7,38 +7,38 @@
     <style>
       body { font-family: Arial, sans-serif; max-width: 920px; margin: 24px auto; padding: 0 16px; }
       .row { display: flex; gap: 16px; flex-wrap: wrap; align-items: flex-start; }
-      .card { border: 1px solid #ddd; border-radius: 10px; padding: 16px; background: #fff; }
-      label { display:block; font-size: 14px; margin: 12px 0 6px; }
+      .card { border: 1px solid #ddd; border-radius: 12px; padding: 16px; background: #fff; }
+      label { display:block; font-size: 14px; margin: 12px 0 6px; font-weight: 600; }
       input[type="range"] { width: 100%; }
       select, input[type="file"], input[type="text"], button { width: 100%; padding: 10px; font-size: 14px; box-sizing: border-box; }
       button { cursor: pointer; }
-      .muted { color:#666; font-size: 12px; line-height: 1.4; }
-      img { max-width: 100%; border: 1px solid #eee; border-radius: 8px; background: repeating-conic-gradient(#f6f6f6 0% 25%, #ffffff 0% 50%) 50%/20px 20px; }
+      button:disabled { opacity: .6; cursor: not-allowed; }
+      .muted { color:#666; font-size: 12px; line-height: 1.35; }
+      img { max-width: 100%; border: 1px solid #eee; border-radius: 10px; background: repeating-conic-gradient(#f6f6f6 0% 25%, #ffffff 0% 50%) 50% / 16px 16px; }
       .ok { color: #0a7a0a; }
       .err { color: #b00020; white-space: pre-wrap; }
       .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; font-size: 12px; }
-      .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
       .pill { display:inline-block; padding: 3px 8px; border: 1px solid #ddd; border-radius: 999px; font-size: 12px; color:#333; background:#fafafa; }
-      .smallbtn { padding: 8px 10px; font-size: 13px; }
-      .hr { height: 1px; background: #eee; margin: 14px 0; }
+      .btnRow { display:flex; gap:10px; }
+      .btnRow button { width: 100%; }
     </style>
   </head>
   <body>
-    <h1>MoreTranz Halftone Tool</h1>
-    <p class="muted">
+    <h1 style="margin-bottom:8px;">MoreTranz Halftone Tool</h1>
+    <p class="muted" style="margin-top:0;">
       Uploads to Cloudflare R2, processes on Render, returns a downloadable PNG.
       <span class="pill">Tip: 12&quot; @ 300dpi = 3600px</span>
     </p>
 
     <div class="row">
       <div class="card" style="flex: 1 1 360px;">
-        <h3>1) Choose image</h3>
+        <h3 style="margin-top:0;">1) Choose image</h3>
         <input id="file" type="file" accept="image/png,image/jpeg,image/webp" />
-        <div id="fileInfo" class="muted"></div>
+        <div id="fileInfo" class="muted" style="margin-top:6px;"></div>
 
-        <div class="hr"></div>
+        <hr style="border:none;border-top:1px solid #eee;margin:16px 0;"/>
 
-        <h3>2) Settings</h3>
+        <h3 style="margin:0 0 8px;">2) Settings</h3>
 
         <label>Dot shape</label>
         <select id="dotShape">
@@ -49,24 +49,18 @@
 
         <label>Cell size: <span id="cellSizeVal">12</span></label>
         <input id="cellSize" type="range" min="8" max="30" step="1" value="12" />
-        <div class="muted">Smaller = more detail but more CPU.</div>
+        <div class="muted">Smaller = more detail but more CPU/RAM.</div>
 
-        <label>Max width: <span id="maxWidthVal">3600</span> px</label>
-        <input id="maxWidth" type="range" min="500" max="3600" step="50" value="3600" />
-        <div class="muted">Lower this if performance is slow. For 12&quot; @ 300dpi, use 3600.</div>
-
-        <label>Strength: <span id="strengthVal">60</span></label>
-        <input id="strength" type="range" min="0" max="100" step="1" value="60" />
-        <div class="muted">
-          0 = lighter effect, 100 = stronger effect (more contrast / more dots).
-        </div>
+        <label style="margin-top:14px;">Max width: <span id="maxWidthVal">2000</span> px</label>
+        <input id="maxWidth" type="range" min="500" max="3600" step="50" value="2000" />
+        <div class="muted">For 12&quot; @ 300dpi, use 3600. Reduce if performance is slow.</div>
 
         <label style="margin-top:14px;">API base URL</label>
         <input id="apiBase" class="mono" value="https://moretranz-halftone.onrender.com" />
 
-        <div class="grid2" style="margin-top:12px;">
+        <div class="btnRow" style="margin-top:14px;">
           <button id="go">Generate Halftone</button>
-          <button id="reset" class="smallbtn" type="button">Reset defaults</button>
+          <button id="reset" type="button">Reset defaults</button>
         </div>
 
         <div id="status" style="margin-top:12px;"></div>
@@ -74,7 +68,7 @@
       </div>
 
       <div class="card" style="flex: 1 1 420px;">
-        <h3>Preview</h3>
+        <h3 style="margin-top:0;">Preview</h3>
         <div class="muted">Original</div>
         <img id="origPreview" alt="" />
         <div style="height:10px;"></div>
@@ -96,66 +90,60 @@
       const goBtn = $("go");
       const resetBtn = $("reset");
       const dlBtn = $("download");
-
       const apiBase = $("apiBase");
+
       const cellSize = $("cellSize");
       const maxWidth = $("maxWidth");
       const dotShape = $("dotShape");
-      const strength = $("strength");
-
       const cellSizeVal = $("cellSizeVal");
       const maxWidthVal = $("maxWidthVal");
-      const strengthVal = $("strengthVal");
 
-      // Defaults (match UI)
       const DEFAULTS = {
         dotShape: "circle",
         cellSize: 12,
-        maxWidth: 3600,
-        strength: 60,
-        apiBase: "https://moretranz-halftone.onrender.com",
+        maxWidth: 2000,
+        apiBase: "https://moretranz-halftone.onrender.com"
       };
+
+      cellSize.addEventListener("input", () => (cellSizeVal.textContent = cellSize.value));
+      maxWidth.addEventListener("input", () => (maxWidthVal.textContent = maxWidth.value));
+
+      let lastDownloadUrl = null;
+
+      resetBtn.addEventListener("click", () => {
+        dotShape.value = DEFAULTS.dotShape;
+        cellSize.value = DEFAULTS.cellSize;
+        maxWidth.value = DEFAULTS.maxWidth;
+        apiBase.value = DEFAULTS.apiBase;
+        cellSizeVal.textContent = DEFAULTS.cellSize;
+        maxWidthVal.textContent = DEFAULTS.maxWidth;
+        setStatus("");
+        setDebug("");
+      });
+
+      fileEl.addEventListener("change", () => {
+        const f = fileEl.files?.[0];
+        if (!f) return;
+
+        fileInfo.textContent = `${f.name} — ${f.type || "unknown"} — ${f.size.toLocaleString()} bytes`;
+        origPreview.src = URL.createObjectURL(f);
+
+        outPreview.removeAttribute("src");
+        dlBtn.disabled = true;
+        lastDownloadUrl = null;
+
+        setStatus("");
+        setDebug("");
+      });
 
       function setStatus(msg, kind="") {
         statusEl.className = kind === "err" ? "err" : (kind === "ok" ? "ok" : "");
         statusEl.textContent = msg;
       }
+
       function setDebug(msg) {
         debugEl.textContent = msg;
       }
-
-      function syncLabels() {
-        cellSizeVal.textContent = cellSize.value;
-        maxWidthVal.textContent = maxWidth.value;
-        strengthVal.textContent = strength.value;
-      }
-
-      function resetDefaults() {
-        dotShape.value = DEFAULTS.dotShape;
-        cellSize.value = DEFAULTS.cellSize;
-        maxWidth.value = DEFAULTS.maxWidth;
-        strength.value = DEFAULTS.strength;
-        apiBase.value = DEFAULTS.apiBase;
-        syncLabels();
-      }
-
-      cellSize.addEventListener("input", syncLabels);
-      maxWidth.addEventListener("input", syncLabels);
-      strength.addEventListener("input", syncLabels);
-
-      let lastDownloadUrl = null;
-
-      fileEl.addEventListener("change", () => {
-        const f = fileEl.files?.[0];
-        if (!f) return;
-        fileInfo.textContent = `${f.name} — ${f.type || "unknown"} — ${f.size.toLocaleString()} bytes`;
-        origPreview.src = URL.createObjectURL(f);
-        outPreview.removeAttribute("src");
-        dlBtn.disabled = true;
-        lastDownloadUrl = null;
-        setStatus("");
-        setDebug("");
-      });
 
       async function jsonOrText(resp) {
         const ct = resp.headers.get("content-type") || "";
@@ -163,23 +151,61 @@
         return resp.text();
       }
 
+      function normalizeBaseUrl(raw) {
+        return String(raw || "").trim().replace(/\/+$/, "");
+      }
+
+      // Helpful error mapping for "Failed to fetch"
+      function friendlyNetworkError(err) {
+        const m = String(err?.message || err || "");
+        if (m.includes("Failed to fetch")) {
+          return [
+            "Failed to fetch",
+            "",
+            "This usually means the API was temporarily unavailable (restart) or your browser blocked the request.",
+            "Try again in 5–10 seconds.",
+          ].join("\n");
+        }
+        return m;
+      }
+
+      // Simple retry for transient failures (e.g., instance restarting)
+      async function fetchWithRetry(url, opts, { tries = 2, delayMs = 700 } = {}) {
+        let lastErr;
+        for (let i = 0; i < tries; i++) {
+          try {
+            return await fetch(url, opts);
+          } catch (e) {
+            lastErr = e;
+            if (i < tries - 1) await new Promise(r => setTimeout(r, delayMs));
+          }
+        }
+        throw lastErr;
+      }
+
       goBtn.addEventListener("click", async () => {
         const f = fileEl.files?.[0];
         if (!f) return setStatus("Please choose an image first.", "err");
 
-        // Only allow supported file types
         const allowed = ["image/png", "image/jpeg", "image/webp"];
         if (!allowed.includes(f.type)) return setStatus(`Unsupported type: ${f.type}`, "err");
 
-        const base = apiBase.value.replace(/\/+$/, "");
+        const base = normalizeBaseUrl(apiBase.value);
+        if (!base.startsWith("http")) return setStatus("API base URL must start with http/https.", "err");
+
+        // UI guardrails (matches server-side clamping)
+        const cs = Number(cellSize.value);
+        const mw = Number(maxWidth.value);
+
         setStatus("Working…");
         setDebug("");
         goBtn.disabled = true;
+        resetBtn.disabled = true;
         dlBtn.disabled = true;
 
         try {
           // 1) get upload URL
-          const upResp = await fetch(`${base}/v1/halftone/upload-url`, {
+          const upResp = await fetchWithRetry(`${base}/v1/halftone/upload-url`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -187,7 +213,7 @@
               contentType: f.type,
               contentLength: f.size
             })
-          });
+          }, { tries: 2, delayMs: 500 });
 
           if (!upResp.ok) {
             const body = await jsonOrText(upResp);
@@ -197,11 +223,11 @@
           const up = await upResp.json();
 
           // 2) PUT the file to R2
-          const putResp = await fetch(up.uploadUrl, {
+          const putResp = await fetchWithRetry(up.uploadUrl, {
             method: "PUT",
             headers: up.headers || { "Content-Type": f.type },
             body: f
-          });
+          }, { tries: 2, delayMs: 500 });
 
           if (!putResp.ok) {
             const txt = await putResp.text().catch(() => "");
@@ -209,22 +235,28 @@
           }
 
           // 3) process
-          const payload = {
-            key: up.key,
-            cellSize: Number(cellSize.value),
-            maxWidth: Number(maxWidth.value),
-            dotShape: dotShape.value,
-            strength: Number(strength.value)
-          };
-
-          const procResp = await fetch(`${base}/v1/halftone/process`, {
+          const procResp = await fetchWithRetry(`${base}/v1/halftone/process`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload)
-          });
+            body: JSON.stringify({
+              key: up.key,
+              cellSize: cs,
+              maxWidth: mw,
+              dotShape: dotShape.value
+            })
+          }, { tries: 2, delayMs: 900 });
 
           if (!procResp.ok) {
             const body = await jsonOrText(procResp);
+
+            // Special-case "busy"
+            if (procResp.status === 429) {
+              throw new Error(
+                "Processor busy (429). Wait ~5 seconds and click Generate again.\n\n" +
+                JSON.stringify(body, null, 2)
+              );
+            }
+
             throw new Error(`process failed (${procResp.status}): ${JSON.stringify(body, null, 2)}`);
           }
 
@@ -239,39 +271,34 @@
           dlBtn.disabled = false;
 
           setStatus("Done ✅", "ok");
-          setDebug(
-            `uploadKey: ${up.key}\n` +
-            `outputKey: ${proc.outputKey || "(not provided)"}\n` +
-            `params: ${JSON.stringify(proc.params || payload, null, 2)}`
-          );
+
+          const perf = proc.perf ? `\nms: ${proc.perf.ms}\ncells: ${proc.perf.cellCount}\nout: ${proc.perf.outWidth}x${proc.perf.outHeight}` : "";
+          setDebug(`uploadKey: ${up.key}\noutputKey: ${proc.outputKey || "(not provided)"}${perf}`);
         } catch (err) {
-          setStatus(String(err?.message || err), "err");
+          setStatus(friendlyNetworkError(err), "err");
         } finally {
           goBtn.disabled = false;
+          resetBtn.disabled = false;
         }
       });
 
       dlBtn.addEventListener("click", async () => {
         if (!lastDownloadUrl) return;
-        const resp = await fetch(lastDownloadUrl);
-        const blob = await resp.blob();
-        const a = document.createElement("a");
-        a.href = URL.createObjectURL(blob);
-        a.download = "halftone.png";
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-      });
 
-      resetBtn.addEventListener("click", () => {
-        resetDefaults();
-        setStatus("Defaults reset.", "ok");
-        setTimeout(() => setStatus(""), 1200);
-      });
+        try {
+          const resp = await fetchWithRetry(lastDownloadUrl, {}, { tries: 2, delayMs: 500 });
+          const blob = await resp.blob();
 
-      // Init
-      resetDefaults();
-      syncLabels();
+          const a = document.createElement("a");
+          a.href = URL.createObjectURL(blob);
+          a.download = "halftone.png";
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+        } catch (err) {
+          setStatus(friendlyNetworkError(err), "err");
+        }
+      });
     </script>
   </body>
 </html>

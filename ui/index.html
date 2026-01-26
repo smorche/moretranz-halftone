@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <title>MoreTranz Halftone Tool</title>
     <style>
-      body { font-family: Arial, sans-serif; max-width: 920px; margin: 24px auto; padding: 0 16px; }
+      body { font-family: Arial, sans-serif; max-width: 980px; margin: 24px auto; padding: 0 16px; }
       .row { display: flex; gap: 16px; flex-wrap: wrap; align-items: flex-start; }
       .card { border: 1px solid #ddd; border-radius: 12px; padding: 16px; background: #fff; }
       label { display:block; font-size: 14px; margin: 12px 0 6px; font-weight: 600; }
@@ -21,6 +21,12 @@
       .pill { display:inline-block; padding: 3px 8px; border: 1px solid #ddd; border-radius: 999px; font-size: 12px; color:#333; background:#fafafa; }
       .btnRow { display:flex; gap:10px; }
       .btnRow button { width: 100%; }
+      .toggleRow { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:10px 12px; border:1px solid #eee; border-radius:10px; background:#fafafa; }
+      .toggleRow input { width:auto; transform: scale(1.15); }
+      details { margin-top: 12px; }
+      details > summary { cursor: pointer; font-weight: 600; }
+      .grid2 { display:grid; grid-template-columns: 1fr 1fr; gap:12px; }
+      @media (max-width: 720px) { .grid2 { grid-template-columns: 1fr; } }
     </style>
   </head>
   <body>
@@ -28,10 +34,11 @@
     <p class="muted" style="margin-top:0;">
       Uploads to Cloudflare R2, processes on Render, returns a downloadable PNG.
       <span class="pill">Tip: 12&quot; @ 300dpi = 3600px</span>
+      <span class="pill">DTF-safe output (prevents faint dots → unwanted white)</span>
     </p>
 
     <div class="row">
-      <div class="card" style="flex: 1 1 360px;">
+      <div class="card" style="flex: 1 1 380px;">
         <h3 style="margin-top:0;">1) Choose image</h3>
         <input id="file" type="file" accept="image/png,image/jpeg,image/webp" />
         <div id="fileInfo" class="muted" style="margin-top:6px;"></div>
@@ -55,6 +62,55 @@
         <input id="maxWidth" type="range" min="500" max="3600" step="50" value="2000" />
         <div class="muted">For 12&quot; @ 300dpi, use 3600. Reduce if performance is slow.</div>
 
+        <div class="toggleRow" style="margin-top:14px;">
+          <div>
+            <div style="font-weight:700;">DTF Safe Mode</div>
+            <div class="muted">Prevents faint dots that cause unwanted white underbase.</div>
+          </div>
+          <input id="dtfSafe" type="checkbox" checked />
+        </div>
+
+        <div class="grid2" style="margin-top:10px;">
+          <div>
+            <label>Darkness (dot gain): <span id="dotGainVal">1.25</span></label>
+            <input id="dotGain" type="range" min="0.80" max="1.80" step="0.05" value="1.25" />
+            <div class="muted">Higher = darker (more dot coverage), better for DTF.</div>
+          </div>
+          <div>
+            <label>Min dot: <span id="minDotVal">0.18</span></label>
+            <input id="minDot" type="range" min="0.00" max="0.40" step="0.01" value="0.18" />
+            <div class="muted">Raises highlight dots so prints don’t wash out.</div>
+          </div>
+        </div>
+
+        <details id="advanced">
+          <summary>Advanced (DTF thresholds)</summary>
+
+          <div class="grid2" style="margin-top:10px;">
+            <div>
+              <label>Alpha threshold: <span id="alphaThresholdVal">32</span></label>
+              <input id="alphaThreshold" type="range" min="0" max="200" step="1" value="32" />
+              <div class="muted">
+                Ignores pixels below this alpha when building dots. Higher = fewer faint edge dots.
+              </div>
+            </div>
+
+            <div>
+              <label>Min coverage: <span id="minCoverageVal">0.15</span></label>
+              <input id="minCoverage" type="range" min="0.00" max="0.60" step="0.01" value="0.15" />
+              <div class="muted">
+                A cell must have at least this % of “real” pixels (alpha ≥ threshold) to emit a dot.
+              </div>
+            </div>
+          </div>
+
+          <label style="margin-top:12px;">Alpha mode</label>
+          <select id="alphaMode">
+            <option value="binary" selected>binary (DTF recommended — dot is fully opaque or absent)</option>
+            <option value="average">average (legacy-like — can create faint dots)</option>
+          </select>
+        </details>
+
         <label style="margin-top:14px;">API base URL</label>
         <input id="apiBase" class="mono" value="https://moretranz-halftone.onrender.com" />
 
@@ -67,7 +123,7 @@
         <div id="debug" class="mono muted" style="margin-top:10px;"></div>
       </div>
 
-      <div class="card" style="flex: 1 1 420px;">
+      <div class="card" style="flex: 1 1 460px;">
         <h3 style="margin-top:0;">Preview</h3>
         <div class="muted">Original</div>
         <img id="origPreview" alt="" />
@@ -75,6 +131,10 @@
         <div class="muted">Halftone output</div>
         <img id="outPreview" alt="" />
         <button id="download" style="margin-top:12px;" disabled>Download PNG</button>
+
+        <div class="muted" style="margin-top:10px;">
+          Tip: If you see “white haze” in prints, keep DTF Safe Mode ON and increase Alpha threshold slightly.
+        </div>
       </div>
     </div>
 
@@ -98,15 +158,51 @@
       const cellSizeVal = $("cellSizeVal");
       const maxWidthVal = $("maxWidthVal");
 
+      const dtfSafe = $("dtfSafe");
+      const dotGain = $("dotGain");
+      const minDot = $("minDot");
+      const dotGainVal = $("dotGainVal");
+      const minDotVal = $("minDotVal");
+
+      const alphaThreshold = $("alphaThreshold");
+      const minCoverage = $("minCoverage");
+      const alphaMode = $("alphaMode");
+      const alphaThresholdVal = $("alphaThresholdVal");
+      const minCoverageVal = $("minCoverageVal");
+      const advanced = $("advanced");
+
       const DEFAULTS = {
         dotShape: "circle",
         cellSize: 12,
         maxWidth: 2000,
-        apiBase: "https://moretranz-halftone.onrender.com"
+        apiBase: "https://moretranz-halftone.onrender.com",
+
+        dtfSafe: true,
+        dotGain: 1.25,
+        minDot: 0.18,
+        alphaThreshold: 32,
+        minCoverage: 0.15,
+        alphaMode: "binary",
       };
 
       cellSize.addEventListener("input", () => (cellSizeVal.textContent = cellSize.value));
       maxWidth.addEventListener("input", () => (maxWidthVal.textContent = maxWidth.value));
+      dotGain.addEventListener("input", () => (dotGainVal.textContent = dotGain.value));
+      minDot.addEventListener("input", () => (minDotVal.textContent = minDot.value));
+      alphaThreshold.addEventListener("input", () => (alphaThresholdVal.textContent = alphaThreshold.value));
+      minCoverage.addEventListener("input", () => (minCoverageVal.textContent = Number(minCoverage.value).toFixed(2)));
+
+      function applyDtfSafeUiState() {
+        const on = dtfSafe.checked;
+
+        // If DTF safe is on, default to binary, and keep advanced visible but “guided”.
+        // We don't disable advanced controls because you said you don't mind more frontend changes
+        // and you may want to tune threshold/coverage.
+        if (on) {
+          alphaMode.value = "binary";
+        }
+      }
+      dtfSafe.addEventListener("change", applyDtfSafeUiState);
 
       let lastDownloadUrl = null;
 
@@ -115,8 +211,22 @@
         cellSize.value = DEFAULTS.cellSize;
         maxWidth.value = DEFAULTS.maxWidth;
         apiBase.value = DEFAULTS.apiBase;
+
+        dtfSafe.checked = DEFAULTS.dtfSafe;
+        dotGain.value = DEFAULTS.dotGain;
+        minDot.value = DEFAULTS.minDot;
+        alphaThreshold.value = DEFAULTS.alphaThreshold;
+        minCoverage.value = DEFAULTS.minCoverage;
+        alphaMode.value = DEFAULTS.alphaMode;
+
         cellSizeVal.textContent = DEFAULTS.cellSize;
         maxWidthVal.textContent = DEFAULTS.maxWidth;
+        dotGainVal.textContent = DEFAULTS.dotGain;
+        minDotVal.textContent = DEFAULTS.minDot;
+        alphaThresholdVal.textContent = DEFAULTS.alphaThreshold;
+        minCoverageVal.textContent = Number(DEFAULTS.minCoverage).toFixed(2);
+
+        applyDtfSafeUiState();
         setStatus("");
         setDebug("");
       });
@@ -155,7 +265,6 @@
         return String(raw || "").trim().replace(/\/+$/, "");
       }
 
-      // Helpful error mapping for "Failed to fetch"
       function friendlyNetworkError(err) {
         const m = String(err?.message || err || "");
         if (m.includes("Failed to fetch")) {
@@ -169,7 +278,6 @@
         return m;
       }
 
-      // Simple retry for transient failures (e.g., instance restarting)
       async function fetchWithRetry(url, opts, { tries = 2, delayMs = 700 } = {}) {
         let lastErr;
         for (let i = 0; i < tries; i++) {
@@ -235,21 +343,33 @@
           }
 
           // 3) process
+          const dtfOn = dtfSafe.checked;
+
+          const payload = {
+            key: up.key,
+            cellSize: cs,
+            maxWidth: mw,
+            dotShape: dotShape.value,
+
+            // Darkness / coverage controls
+            dotGain: Number(dotGain.value),
+            minDot: Number(minDot.value),
+
+            // DTF controls
+            alphaThreshold: Number(alphaThreshold.value),
+            minCoverage: Number(minCoverage.value),
+            alphaMode: dtfOn ? "binary" : alphaMode.value,
+          };
+
           const procResp = await fetchWithRetry(`${base}/v1/halftone/process`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              key: up.key,
-              cellSize: cs,
-              maxWidth: mw,
-              dotShape: dotShape.value
-            })
+            body: JSON.stringify(payload)
           }, { tries: 2, delayMs: 900 });
 
           if (!procResp.ok) {
             const body = await jsonOrText(procResp);
 
-            // Special-case "busy"
             if (procResp.status === 429) {
               throw new Error(
                 "Processor busy (429). Wait ~5 seconds and click Generate again.\n\n" +
@@ -272,8 +392,13 @@
 
           setStatus("Done ✅", "ok");
 
-          const perf = proc.perf ? `\nms: ${proc.perf.ms}\ncells: ${proc.perf.cellCount}\nout: ${proc.perf.outWidth}x${proc.perf.outHeight}` : "";
-          setDebug(`uploadKey: ${up.key}\noutputKey: ${proc.outputKey || "(not provided)"}${perf}`);
+          const perf = proc.perf
+            ? `\nms: ${proc.perf.ms}\ncells: ${proc.perf.cellCount}\nout: ${proc.perf.outWidth}x${proc.perf.outHeight}`
+            : "";
+
+          setDebug(
+            `uploadKey: ${up.key}\noutputKey: ${proc.outputKey || "(not provided)"}\nparams: ${JSON.stringify(proc.params || payload)}${perf}`
+          );
         } catch (err) {
           setStatus(friendlyNetworkError(err), "err");
         } finally {
@@ -299,6 +424,15 @@
           setStatus(friendlyNetworkError(err), "err");
         }
       });
+
+      // Initialize labels
+      cellSizeVal.textContent = cellSize.value;
+      maxWidthVal.textContent = maxWidth.value;
+      dotGainVal.textContent = dotGain.value;
+      minDotVal.textContent = minDot.value;
+      alphaThresholdVal.textContent = alphaThreshold.value;
+      minCoverageVal.textContent = Number(minCoverage.value).toFixed(2);
+      applyDtfSafeUiState();
     </script>
   </body>
 </html>

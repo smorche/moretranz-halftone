@@ -5,76 +5,87 @@
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <title>MoreTranz Halftone Tool</title>
     <style>
-      body { font-family: Arial, sans-serif; max-width: 1120px; margin: 24px auto; padding: 0 16px; }
+      :root { --pageMax: 1180px; --previewW: 420px; }
+      body { font-family: Arial, sans-serif; margin: 24px auto; padding: 0 16px; max-width: var(--pageMax); }
+      h1 { margin: 0 0 8px; }
 
-      .layout {
+      .muted { color:#666; font-size: 12px; line-height: 1.35; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; font-size: 12px; }
+      .pill { display:inline-block; padding: 3px 8px; border: 1px solid #ddd; border-radius: 999px; font-size: 12px; color:#333; background:#fafafa; }
+
+      .grid {
         display: grid;
-        grid-template-columns: minmax(360px, 1fr) 460px;
+        grid-template-columns: 1fr var(--previewW);
         gap: 16px;
         align-items: start;
       }
-      @media (max-width: 980px) { .layout { grid-template-columns: 1fr; } }
+      @media (max-width: 980px) {
+        .grid { grid-template-columns: 1fr; }
+      }
 
       .card { border: 1px solid #ddd; border-radius: 12px; padding: 16px; background: #fff; }
-      .previewCol { position: sticky; top: 16px; }
-      @media (max-width: 980px) { .previewCol { position: static; } }
-
       label { display:block; font-size: 14px; margin: 12px 0 6px; font-weight: 600; }
       input[type="range"] { width: 100%; }
       select, input[type="file"], input[type="text"], button { width: 100%; padding: 10px; font-size: 14px; box-sizing: border-box; }
       button { cursor: pointer; }
       button:disabled { opacity: .6; cursor: not-allowed; }
 
-      .muted { color:#666; font-size: 12px; line-height: 1.35; }
       .ok { color: #0a7a0a; }
       .err { color: #b00020; white-space: pre-wrap; }
-      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; font-size: 12px; }
-      .pill { display:inline-block; padding: 3px 8px; border: 1px solid #ddd; border-radius: 999px; font-size: 12px; color:#333; background:#fafafa; }
 
-      .btnRow { display:flex; gap:10px; }
+      .btnRow { display:flex; gap:10px; margin-top: 14px; }
       .btnRow button { width: 100%; }
 
-      .toggleRow {
-        display:flex; align-items:center; justify-content:space-between; gap:12px;
-        padding:10px 12px; border:1px solid #eee; border-radius:10px; background:#fafafa;
-      }
-      .toggleRow input { width:auto; transform: scale(1.15); }
+      .previewCard { width: var(--previewW); }
+      @media (max-width: 980px) { .previewCard { width: auto; } }
 
-      .grid2 { display:grid; grid-template-columns: 1fr 1fr; gap:12px; }
-      @media (max-width: 720px) { .grid2 { grid-template-columns: 1fr; } }
-
-      .imgBox {
+      .imgWrap {
         border: 1px solid #eee;
         border-radius: 10px;
-        background: repeating-conic-gradient(#f6f6f6 0% 25%, #ffffff 0% 50%) 50% / 16px 16px;
         padding: 8px;
+        background: #fff;
       }
-      img {
+
+      img.previewImg {
         display:block;
         width: 100%;
         height: auto;
-        max-height: 360px;
+        max-height: 360px;   /* keeps them “stacked” and not huge */
         object-fit: contain;
         border-radius: 8px;
+        border: 1px solid #eee;
+        background: repeating-conic-gradient(#f6f6f6 0% 25%, #ffffff 0% 50%) 50% / 16px 16px;
       }
-      @media (max-width: 980px) { img { max-height: 420px; } }
+
+      details > summary { cursor: pointer; font-weight: 700; margin-top: 10px; }
+      .twoCol { display:grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+      @media (max-width: 560px) { .twoCol { grid-template-columns: 1fr; } }
+
+      .toggleRow {
+        display:flex; gap:10px; align-items:center; justify-content: space-between;
+        padding: 10px 12px; border: 1px solid #eee; border-radius: 10px; background:#fafafa;
+        margin-top: 12px;
+      }
+      .toggleRow label { margin: 0; font-weight: 700; }
+      .toggleRow .muted { margin: 0; }
+      .toggleRow input { width: auto; transform: scale(1.1); }
     </style>
   </head>
   <body>
-    <h1 style="margin-bottom:8px;">MoreTranz Halftone Tool</h1>
+    <h1>MoreTranz Halftone Tool</h1>
     <p class="muted" style="margin-top:0;">
       Uploads to Cloudflare R2, processes on Render, returns a downloadable PNG.
       <span class="pill">Tip: 12&quot; @ 300dpi = 3600px</span>
       <span class="pill">DTF-safe output (binary alpha)</span>
     </p>
 
-    <div class="layout">
+    <div class="grid">
       <div class="card">
         <h3 style="margin-top:0;">1) Choose image</h3>
         <input id="file" type="file" accept="image/png,image/jpeg,image/webp" />
         <div id="fileInfo" class="muted" style="margin-top:6px;"></div>
 
-        <hr style="border:none;border-top:1px solid #eee;margin:16px 0;"/>
+        <hr style="border:none;border-top:1px solid #eee;margin:16px 0;" />
 
         <h3 style="margin:0 0 8px;">2) Settings</h3>
 
@@ -93,40 +104,38 @@
         <input id="maxWidth" type="range" min="500" max="3600" step="50" value="2000" />
         <div class="muted">For 12&quot; @ 300dpi, use 3600. Reduce if performance is slow.</div>
 
-        <div class="toggleRow" style="margin-top:14px;">
+        <div class="toggleRow">
           <div>
-            <div style="font-weight:700;">DTF Safe Mode</div>
-            <div class="muted">Binary alpha (prevents faint pixels → unwanted white).</div>
+            <label for="dtfSafe">DTF Safe Mode</label>
+            <div class="muted">Binary alpha to prevent unwanted white underbase.</div>
           </div>
           <input id="dtfSafe" type="checkbox" checked />
         </div>
 
-        <div class="grid2" style="margin-top:10px;">
+        <div class="twoCol" style="margin-top:12px;">
           <div>
             <label>Darkness (dot gain): <span id="dotGainVal">1.35</span></label>
-            <input id="dotGain" type="range" min="0.80" max="1.80" step="0.05" value="1.35" />
+            <input id="dotGain" type="range" min="0.50" max="2.50" step="0.05" value="1.35" />
             <div class="muted">Higher = darker (more dot coverage).</div>
           </div>
           <div>
             <label>Min dot: <span id="minDotVal">0.18</span></label>
-            <input id="minDot" type="range" min="0.00" max="0.40" step="0.01" value="0.18" />
+            <input id="minDot" type="range" min="0" max="0.60" step="0.01" value="0.18" />
             <div class="muted">Raises highlight dot size to hold brightness in print.</div>
           </div>
         </div>
 
-        <details style="margin-top:12px;" open>
-          <summary style="cursor:pointer;font-weight:600;">Advanced (masking thresholds)</summary>
-
-          <div class="grid2" style="margin-top:10px;">
+        <details style="margin-top:10px;">
+          <summary>Advanced (masking thresholds)</summary>
+          <div class="twoCol" style="margin-top:10px;">
             <div>
               <label>Alpha threshold: <span id="alphaThresholdVal">48</span></label>
-              <input id="alphaThreshold" type="range" min="1" max="255" step="1" value="48" />
-              <div class="muted">Only pixels with alpha ≥ this are treated as “real art”.</div>
+              <input id="alphaThreshold" type="range" min="0" max="255" step="1" value="48" />
+              <div class="muted">Only pixels with alpha ≥ this count as “real art”.</div>
             </div>
-
             <div>
               <label>Min coverage: <span id="minCoverageVal">0.20</span></label>
-              <input id="minCoverage" type="range" min="0.00" max="0.80" step="0.01" value="0.20" />
+              <input id="minCoverage" type="range" min="0" max="1" step="0.01" value="0.20" />
               <div class="muted">Cell must have this % of “real art” pixels to emit a dot.</div>
             </div>
           </div>
@@ -135,7 +144,7 @@
         <label style="margin-top:14px;">API base URL</label>
         <input id="apiBase" class="mono" value="https://moretranz-halftone.onrender.com" />
 
-        <div class="btnRow" style="margin-top:14px;">
+        <div class="btnRow">
           <button id="go">Generate Halftone</button>
           <button id="reset" type="button">Reset defaults</button>
         </div>
@@ -144,16 +153,20 @@
         <div id="debug" class="mono muted" style="margin-top:10px;"></div>
       </div>
 
-      <div class="card previewCol">
+      <div class="card previewCard">
         <h3 style="margin-top:0;">Preview</h3>
 
         <div class="muted">Original</div>
-        <div class="imgBox"><img id="origPreview" alt="" /></div>
+        <div class="imgWrap">
+          <img id="origPreview" class="previewImg" alt="" />
+        </div>
 
         <div style="height:12px;"></div>
 
         <div class="muted">Halftone output</div>
-        <div class="imgBox"><img id="outPreview" alt="" /></div>
+        <div class="imgWrap">
+          <img id="outPreview" class="previewImg" alt="" />
+        </div>
 
         <button id="download" style="margin-top:12px;" disabled>Download PNG</button>
       </div>
@@ -176,17 +189,17 @@
       const cellSize = $("cellSize");
       const maxWidth = $("maxWidth");
       const dotShape = $("dotShape");
-      const cellSizeVal = $("cellSizeVal");
-      const maxWidthVal = $("maxWidthVal");
 
       const dtfSafe = $("dtfSafe");
       const dotGain = $("dotGain");
       const minDot = $("minDot");
-      const dotGainVal = $("dotGainVal");
-      const minDotVal = $("minDotVal");
-
       const alphaThreshold = $("alphaThreshold");
       const minCoverage = $("minCoverage");
+
+      const cellSizeVal = $("cellSizeVal");
+      const maxWidthVal = $("maxWidthVal");
+      const dotGainVal = $("dotGainVal");
+      const minDotVal = $("minDotVal");
       const alphaThresholdVal = $("alphaThresholdVal");
       const minCoverageVal = $("minCoverageVal");
 
@@ -199,15 +212,8 @@
         dotGain: 1.35,
         minDot: 0.18,
         alphaThreshold: 48,
-        minCoverage: 0.20,
+        minCoverage: 0.20
       };
-
-      cellSize.addEventListener("input", () => (cellSizeVal.textContent = cellSize.value));
-      maxWidth.addEventListener("input", () => (maxWidthVal.textContent = maxWidth.value));
-      dotGain.addEventListener("input", () => (dotGainVal.textContent = dotGain.value));
-      minDot.addEventListener("input", () => (minDotVal.textContent = minDot.value));
-      alphaThreshold.addEventListener("input", () => (alphaThresholdVal.textContent = alphaThreshold.value));
-      minCoverage.addEventListener("input", () => (minCoverageVal.textContent = Number(minCoverage.value).toFixed(2)));
 
       function setStatus(msg, kind="") {
         statusEl.className = kind === "err" ? "err" : (kind === "ok" ? "ok" : "");
@@ -251,22 +257,21 @@
         throw lastErr;
       }
 
-      let lastDownloadUrl = null;
+      function syncLabels() {
+        cellSizeVal.textContent = cellSize.value;
+        maxWidthVal.textContent = maxWidth.value;
+        dotGainVal.textContent = Number(dotGain.value).toFixed(2);
+        minDotVal.textContent = Number(minDot.value).toFixed(2);
+        alphaThresholdVal.textContent = alphaThreshold.value;
+        minCoverageVal.textContent = Number(minCoverage.value).toFixed(2);
+      }
 
-      fileEl.addEventListener("change", () => {
-        const f = fileEl.files?.[0];
-        if (!f) return;
-
-        fileInfo.textContent = `${f.name} — ${f.type || "unknown"} — ${f.size.toLocaleString()} bytes`;
-        origPreview.src = URL.createObjectURL(f);
-
-        outPreview.removeAttribute("src");
-        dlBtn.disabled = true;
-        lastDownloadUrl = null;
-
-        setStatus("");
-        setDebug("");
+      [cellSize, maxWidth, dotGain, minDot, alphaThreshold, minCoverage].forEach(el => {
+        el.addEventListener("input", syncLabels);
       });
+      syncLabels();
+
+      let lastDownloadUrl = null;
 
       resetBtn.addEventListener("click", () => {
         dotShape.value = DEFAULTS.dotShape;
@@ -280,12 +285,22 @@
         alphaThreshold.value = DEFAULTS.alphaThreshold;
         minCoverage.value = DEFAULTS.minCoverage;
 
-        cellSizeVal.textContent = DEFAULTS.cellSize;
-        maxWidthVal.textContent = DEFAULTS.maxWidth;
-        dotGainVal.textContent = DEFAULTS.dotGain;
-        minDotVal.textContent = DEFAULTS.minDot;
-        alphaThresholdVal.textContent = DEFAULTS.alphaThreshold;
-        minCoverageVal.textContent = Number(DEFAULTS.minCoverage).toFixed(2);
+        syncLabels();
+
+        setStatus("");
+        setDebug("");
+      });
+
+      fileEl.addEventListener("change", () => {
+        const f = fileEl.files?.[0];
+        if (!f) return;
+
+        fileInfo.textContent = `${f.name} — ${f.type || "unknown"} — ${f.size.toLocaleString()} bytes`;
+        origPreview.src = URL.createObjectURL(f);
+
+        outPreview.removeAttribute("src");
+        dlBtn.disabled = true;
+        lastDownloadUrl = null;
 
         setStatus("");
         setDebug("");
@@ -308,6 +323,7 @@
         dlBtn.disabled = true;
 
         try {
+          // 1) get upload URL
           const upResp = await fetchWithRetry(`${base}/v1/halftone/upload-url`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -322,8 +338,10 @@
             const body = await jsonOrText(upResp);
             throw new Error(`upload-url failed (${upResp.status}): ${JSON.stringify(body, null, 2)}`);
           }
+
           const up = await upResp.json();
 
+          // 2) PUT to R2
           const putResp = await fetchWithRetry(up.uploadUrl, {
             method: "PUT",
             headers: up.headers || { "Content-Type": f.type },
@@ -335,29 +353,28 @@
             throw new Error(`R2 PUT failed (${putResp.status}): ${txt || "no body"}`);
           }
 
-          const payload = {
-            key: up.key,
-            cellSize: Number(cellSize.value),
-            maxWidth: Number(maxWidth.value),
-            dotShape: dotShape.value,
-            dotGain: Number(dotGain.value),
-            minDot: Number(minDot.value),
-            alphaThreshold: Number(alphaThreshold.value),
-            minCoverage: Number(minCoverage.value),
-            alphaMode: dtfSafe.checked ? "binary" : "average",
-          };
-
+          // 3) process
           const procResp = await fetchWithRetry(`${base}/v1/halftone/process`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload)
+            body: JSON.stringify({
+              key: up.key,
+              cellSize: Number(cellSize.value),
+              maxWidth: Number(maxWidth.value),
+              dotShape: dotShape.value,
+
+              dtfSafe: !!dtfSafe.checked,
+              dotGain: Number(dotGain.value),
+              minDot: Number(minDot.value),
+              alphaThreshold: Number(alphaThreshold.value),
+              minCoverage: Number(minCoverage.value)
+            })
           }, { tries: 2, delayMs: 900 });
 
           if (!procResp.ok) {
             const body = await jsonOrText(procResp);
             if (procResp.status === 429) {
-              throw new Error("Processor busy (429). Wait ~5 seconds and click Generate again.\n\n" +
-                JSON.stringify(body, null, 2));
+              throw new Error("Processor busy (429). Wait ~5 seconds and click Generate again.\n\n" + JSON.stringify(body, null, 2));
             }
             throw new Error(`process failed (${procResp.status}): ${JSON.stringify(body, null, 2)}`);
           }
@@ -371,7 +388,10 @@
 
           setStatus("Done ✅", "ok");
 
-          const perf = proc.perf ? `\nms: ${proc.perf.ms}\ncells: ${proc.perf.cellCount}\nout: ${proc.perf.outWidth}x${proc.perf.outHeight}` : "";
+          const perf = proc.perf
+            ? `\nms: ${proc.perf.ms}\ndots: ${proc.perf.emittedDots}\ncells: ${proc.perf.cellCount}\nout: ${proc.perf.outWidth}x${proc.perf.outHeight}`
+            : "";
+
           setDebug(`uploadKey: ${up.key}\noutputKey: ${proc.outputKey || "(not provided)"}${perf}`);
         } catch (err) {
           setStatus(friendlyNetworkError(err), "err");
@@ -398,14 +418,6 @@
           setStatus(friendlyNetworkError(err), "err");
         }
       });
-
-      // init labels
-      cellSizeVal.textContent = cellSize.value;
-      maxWidthVal.textContent = maxWidth.value;
-      dotGainVal.textContent = dotGain.value;
-      minDotVal.textContent = minDot.value;
-      alphaThresholdVal.textContent = alphaThreshold.value;
-      minCoverageVal.textContent = Number(minCoverage.value).toFixed(2);
     </script>
   </body>
 </html>

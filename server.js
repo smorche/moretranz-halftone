@@ -178,6 +178,25 @@ async function makeColorHalftonePng(inputBuffer, opts) {
   }
 
   const { data } = await resized.ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+// after: const { data } = await resized.ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+
+  let nonZero = 0, ge48 = 0, ge100 = 0, ge200 = 0;
+  for (let i = 3; i < data.length; i += 4) {
+    const a = data[i];
+    if (a > 0) nonZero++;
+    if (a >= 48) ge48++;
+    if (a >= 100) ge100++;
+    if (a >= 200) ge200++;
+}
+  
+const total = data.length / 4;
+console.log("ALPHA STATS", {
+  total,
+  nonZeroPct: (nonZero / total).toFixed(4),
+  ge48Pct: (ge48 / total).toFixed(4),
+  ge100Pct: (ge100 / total).toFixed(4),
+  ge200Pct: (ge200 / total).toFixed(4),
+});
 
   const half = cs / 2;
   const shapes = [];

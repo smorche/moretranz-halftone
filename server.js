@@ -126,15 +126,28 @@ function tooBusyResponse(res) {
 }
 
 /**
- * DTF-safe color halftone:
- * - Sample RGB from pixels where alpha >= alphaThreshold
- * - Skip cell if coverage < minCoverage
- * - Dot radius from luminance (dotGain curve + minDot floor)
- * - Output PNG transparency
- * - If alphaMode=binary: harden final alpha to 0/255 (DTF underbase-safe)
- *
- * IMPORTANT: We harden alpha using Sharp pipelines (encoded buffers),
- * not raw RGBA JS loops, to avoid memory spikes / 500s.
+ * Render SVG onto a guaranteed transparent canvas to avoid any background alpha surprises.
+ */
+async function renderSvgToPng({ width, height, svgBuffer }) {
+  return sharp({
+    create: {
+      width,
+      height,
+      channels: 4,
+      background: { r: 0, g: 0, b: 0, alpha: 0 },
+    },
+  })
+    .composite([{ input: svgBuffer }])
+    .png({ compressionLevel: 9, adaptiveFiltering: true })
+    .toBuffer();
+}
+
+/**
+ * DTF-safe halftone:
+ * - Build dots from input sampling
+ * - Render color SVG to PNG
+ * - Render *mask SVG* (same dots, solid white) to PNG
+ * - Use mask alpha ONLY (binary) so no faint pixel haze can create underbase
  */
 async function makeColorHalftonePng(inputBuffer, opts) {
   const {
@@ -143,13 +156,14 @@ async function makeColorHalftonePng(inputBuffer, opts) {
     dotShape,
     dotGain,
     minDot,
+    // sampling thresholds:
     alphaThreshold,
     minCoverage,
-    alphaMode,
+    // output alpha behavior:
+    alphaMode, // "binary" | "average"
   } = opts;
 
   const base = sharp(inputBuffer, { failOn: "none" });
-
   const meta = await base.metadata();
   if (!meta.width || !meta.height) throw new Error("Could not read image dimensions");
 
@@ -177,35 +191,39 @@ async function makeColorHalftonePng(inputBuffer, opts) {
     );
   }
 
+  // raw RGBA pixels
   const { data } = await resized.ensureAlpha().raw().toBuffer({ resolveWithObject: true });
-// after: const { data } = await resized.ensureAlpha().raw().toBuffer({ resolveWithObject: true });
 
-  let nonZero = 0, ge48 = 0, ge100 = 0, ge200 = 0;
-  for (let i = 3; i < data.length; i += 4) {
-    const a = data[i];
-    if (a > 0) nonZero++;
-    if (a >= 48) ge48++;
-    if (a >= 100) ge100++;
-    if (a >= 200) ge200++;
-}
-  
-const total = data.length / 4;
-console.log("ALPHA STATS", {
-  total,
-  nonZeroPct: (nonZero / total).toFixed(4),
-  ge48Pct: (ge48 / total).toFixed(4),
-  ge100Pct: (ge100 / total).toFixed(4),
-  ge200Pct: (ge200 / total).toFixed(4),
-});
+  // Helpful diagnostics (kept — you can remove later)
+  {
+    let nonZero = 0, ge48 = 0, ge100 = 0, ge200 = 0;
+    for (let i = 3; i < data.length; i += 4) {
+      const a = data[i];
+      if (a > 0) nonZero++;
+      if (a >= 48) ge48++;
+      if (a >= 100) ge100++;
+      if (a >= 200) ge200++;
+    }
+    const total = data.length / 4;
+    console.log("ALPHA STATS", {
+      total,
+      nonZeroPct: (nonZero / total).toFixed(4),
+      ge48Pct: (ge48 / total).toFixed(4),
+      ge100Pct: (ge100 / total).toFixed(4),
+      ge200Pct: (ge200 / total).toFixed(4),
+    });
+  }
 
   const half = cs / 2;
-  const shapes = [];
 
-  const aThresh = clamp(Math.floor(alphaThreshold), 1, 255); // IMPORTANT: never allow 0 internally
+  const aThresh = clamp(Math.floor(alphaThreshold), 1, 255);
   const covMin = clamp(Number(minCoverage), 0, 1);
 
   const dg = clamp(Number(dotGain), 0.6, 2.0);
   const minFrac = clamp(Number(minDot), 0, 0.6);
+
+  const colorShapes = [];
+  const maskShapes = [];
 
   for (let row = 0; row < rows; row++) {
     const y0 = row * cs;
@@ -215,9 +233,7 @@ console.log("ALPHA STATS", {
       const x0 = col * cs;
       const x1 = Math.min(x0 + cs, w);
 
-      let rSum = 0,
-        gSum = 0,
-        bSum = 0;
+      let rSum = 0, gSum = 0, bSum = 0;
       let solidCount = 0;
       let totalCount = 0;
 
@@ -228,7 +244,7 @@ console.log("ALPHA STATS", {
           const aPx = data[idx + 3];
           totalCount++;
 
-          // Treat only meaningful alpha as "real"
+          // sampling only from alpha >= threshold
           if (aPx >= aThresh) {
             rSum += data[idx];
             gSum += data[idx + 1];
@@ -241,7 +257,7 @@ console.log("ALPHA STATS", {
       if (!totalCount || solidCount === 0) continue;
 
       const coverage = solidCount / totalCount;
-      if (coverage < covMin) continue; // kills alpha-noise in "empty" canvas
+      if (coverage < covMin) continue;
 
       const r = Math.round(rSum / solidCount);
       const g = Math.round(gSum / solidCount);
@@ -250,13 +266,12 @@ console.log("ALPHA STATS", {
       const lum = luminance255(r, g, b);
       let darkness = 1 - lum / 255;
 
-      // Dot gain curve: dg>1 darkens midtones
+      // dot gain curve (dg>1 darkens midtones)
       darkness = Math.pow(darkness, 1 / dg);
 
-      // Minimum dot floor to hold brightness in print
+      // minimum dot floor
       const frac = clamp(minFrac + (1 - minFrac) * darkness, 0, 1);
       const radius = half * frac;
-
       if (radius < 0.15) continue;
 
       const cx = x0 + (x1 - x0) / 2;
@@ -264,58 +279,85 @@ console.log("ALPHA STATS", {
 
       const fill = `rgb(${r},${g},${b})`;
 
+      // For "average" alpha mode, we can approximate opacity by coverage.
+      // For DTF binary, we ignore opacity (mask determines alpha).
+      const fillOpacity =
+        alphaMode === "average" ? clamp(coverage, 0, 1).toFixed(4) : "1";
+
       if (dotShape === "square") {
         const size = radius * 2;
-        shapes.push(
-          `<rect x="${(cx - size / 2).toFixed(2)}" y="${(cy - size / 2).toFixed(
-            2
-          )}" width="${size.toFixed(2)}" height="${size.toFixed(2)}" fill="${fill}" />`
+        const x = (cx - size / 2).toFixed(2);
+        const y = (cy - size / 2).toFixed(2);
+        const s = size.toFixed(2);
+
+        colorShapes.push(
+          `<rect x="${x}" y="${y}" width="${s}" height="${s}" fill="${fill}" fill-opacity="${fillOpacity}" />`
+        );
+        maskShapes.push(
+          `<rect x="${x}" y="${y}" width="${s}" height="${s}" fill="white" />`
         );
       } else if (dotShape === "ellipse") {
-        const rx = radius * 1.2;
-        const ry = radius * 0.85;
-        shapes.push(
-          `<ellipse cx="${cx.toFixed(2)}" cy="${cy.toFixed(2)}" rx="${rx.toFixed(
-            2
-          )}" ry="${ry.toFixed(2)}" fill="${fill}" />`
+        const rx = (radius * 1.2).toFixed(2);
+        const ry = (radius * 0.85).toFixed(2);
+        const cxs = cx.toFixed(2);
+        const cys = cy.toFixed(2);
+
+        colorShapes.push(
+          `<ellipse cx="${cxs}" cy="${cys}" rx="${rx}" ry="${ry}" fill="${fill}" fill-opacity="${fillOpacity}" />`
+        );
+        maskShapes.push(
+          `<ellipse cx="${cxs}" cy="${cys}" rx="${rx}" ry="${ry}" fill="white" />`
         );
       } else {
-        shapes.push(
-          `<circle cx="${cx.toFixed(2)}" cy="${cy.toFixed(2)}" r="${radius.toFixed(
-            2
-          )}" fill="${fill}" />`
+        const cxs = cx.toFixed(2);
+        const cys = cy.toFixed(2);
+        const rs = radius.toFixed(2);
+
+        colorShapes.push(
+          `<circle cx="${cxs}" cy="${cys}" r="${rs}" fill="${fill}" fill-opacity="${fillOpacity}" />`
+        );
+        maskShapes.push(
+          `<circle cx="${cxs}" cy="${cys}" r="${rs}" fill="white" />`
         );
       }
     }
   }
 
-  const svg = `<?xml version="1.0" encoding="UTF-8"?>
+  const colorSvg = `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">
-  <rect width="100%" height="100%" fill="transparent" />
-  ${shapes.join("")}
+  ${colorShapes.join("")}
 </svg>`;
 
-  // Render SVG -> PNG
-  const renderedPng = await sharp(Buffer.from(svg))
-    .png({ compressionLevel: 9, adaptiveFiltering: true })
-    .toBuffer();
+  const maskSvg = `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">
+  ${maskShapes.join("")}
+</svg>`;
 
-  // DTF: enforce truly binary alpha so faint edge pixels can't trigger white underbase
+  // Render color + mask
+  const colorPng = await renderSvgToPng({ width: w, height: h, svgBuffer: Buffer.from(colorSvg) });
+  const maskPng = await renderSvgToPng({ width: w, height: h, svgBuffer: Buffer.from(maskSvg) });
+
   if (alphaMode === "binary") {
-    const rgbPng = await sharp(renderedPng).ensureAlpha().removeAlpha().png().toBuffer();
-    const alphaPng = await sharp(renderedPng)
+    // ✅ DTF-safe: alpha ONLY comes from mask, binary
+    const alphaBin = await sharp(maskPng)
       .ensureAlpha()
       .extractChannel(3)
-      // any alpha >= 1 becomes 255, else 0
-      .threshold(1)
+      .threshold(1) // any dot pixel => 255
       .png()
       .toBuffer();
 
-    const hardened = await sharp(rgbPng).joinChannel(alphaPng).png().toBuffer();
+    const rgb = await sharp(colorPng)
+      .ensureAlpha()
+      .removeAlpha()
+      .png()
+      .toBuffer();
+
+    const hardened = await sharp(rgb).joinChannel(alphaBin).png().toBuffer();
     return { png: hardened, width: w, height: h, cellCount };
   }
 
-  return { png: renderedPng, width: w, height: h, cellCount };
+  // "average" mode: keep colorPng as-is (uses fill-opacity based on coverage)
+  return { png: colorPng, width: w, height: h, cellCount };
 }
 
 /** ---------------------------
@@ -375,16 +417,18 @@ const ProcessRequest = z.object({
   dotShape: z.enum(["circle", "square", "ellipse"]).default("circle"),
 
   // Darkness controls
-  dotGain: z.number().min(0.6).max(2.0).default(1.25),
+  dotGain: z.number().min(0.6).max(2.0).default(1.35),
   minDot: z.number().min(0.0).max(0.6).default(0.18),
 
-  // DTF controls (defaults tightened to kill background alpha-noise)
+  // Sampling thresholds (DTF-ish defaults)
   alphaThreshold: z.number().int().min(1).max(255).default(48),
   minCoverage: z.number().min(0).max(1).default(0.20),
+
+  // Output alpha behavior
   alphaMode: z.enum(["binary", "average"]).default("binary"),
 });
 
-let ACTIVE_JOBS_GUARD = 0;
+let ACTIVE_GUARD = 0;
 
 app.post("/v1/halftone/process", async (req, res) => {
   const parsed = ProcessRequest.safeParse(req.body);
@@ -394,8 +438,8 @@ app.post("/v1/halftone/process", async (req, res) => {
       .json(errJson("BAD_REQUEST", "Invalid request", { issues: parsed.error.flatten() }));
   }
 
-  if (ACTIVE_JOBS_GUARD >= MAX_CONCURRENT_JOBS) return tooBusyResponse(res);
-  ACTIVE_JOBS_GUARD++;
+  if (ACTIVE_GUARD >= MAX_CONCURRENT_JOBS) return tooBusyResponse(res);
+  ACTIVE_GUARD++;
 
   const {
     key,
@@ -415,11 +459,7 @@ app.post("/v1/halftone/process", async (req, res) => {
     const started = Date.now();
 
     if (maxWidthClamped > SOFT_MAX_WIDTH) {
-      logWithReq(req, "HIGH MEMORY REQUEST (soft warning)", {
-        maxWidth: maxWidthClamped,
-        cellSize,
-        dotShape,
-      });
+      logWithReq(req, "HIGH MEMORY REQUEST (soft warning)", { maxWidth: maxWidthClamped, cellSize, dotShape });
     }
 
     logWithReq(req, "PROCESS PARAMS", {
@@ -434,7 +474,6 @@ app.post("/v1/halftone/process", async (req, res) => {
       alphaMode,
     });
 
-    // Optional HeadObject size check
     try {
       const head = await s3.send(new HeadObjectCommand({ Bucket: process.env.R2_BUCKET, Key: key }));
       if (typeof head.ContentLength === "number" && head.ContentLength > MAX_UPLOAD_BYTES) {
@@ -458,7 +497,6 @@ app.post("/v1/halftone/process", async (req, res) => {
         .json(errJson("TOO_LARGE", `File exceeds max upload size (${MAX_UPLOAD_BYTES} bytes)`));
     }
 
-    // Validate image
     let meta;
     try {
       meta = await sharp(inputBuffer, { failOn: "none" }).metadata();
@@ -542,7 +580,7 @@ app.post("/v1/halftone/process", async (req, res) => {
     console.error(`[${req._rid}] HALFTONE ERROR:`, e);
     return res.status(500).json(errJson("INTERNAL", "Failed to process halftone"));
   } finally {
-    ACTIVE_JOBS_GUARD = Math.max(0, ACTIVE_JOBS_GUARD - 1);
+    ACTIVE_GUARD = Math.max(0, ACTIVE_GUARD - 1);
   }
 });
 

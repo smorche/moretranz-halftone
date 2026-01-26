@@ -121,12 +121,12 @@ function tooBusyResponse(res) {
 }
 
 /**
- * Full-color halftone (RGBA-safe) tuned for DTF:
- * - Sample average RGB from ONLY "solid" pixels (alpha >= threshold)
- * - Skip cells that are mostly faint/edge pixels (coverage < minCoverage)
- * - For DTF, default alphaMode=binary so dots are either fully opaque or absent
- *   (prevents faint dots from triggering unwanted white underbase)
- * - Dot size is based on luminance with dotGain curve + minDot floor
+ * Full-color halftone tuned for DTF:
+ * - Use ONLY pixels with alpha >= alphaThreshold as "solid"
+ * - Skip cells with coverage < minCoverage
+ * - Extra guard: require maxAlphaInCell >= alphaThreshold (prevents stray faint pixels)
+ * - In binary mode, output dot opacity is 1.0 (fully opaque) or dot is absent.
+ * - Dot size uses dotGain curve + minDot floor for darker prints.
  */
 async function makeColorHalftonePng(inputBuffer, {
   cellSize,
@@ -180,10 +180,7 @@ async function makeColorHalftonePng(inputBuffer, {
   const aThresh = clamp(Math.floor(alphaThreshold), 0, 255);
   const covMin = clamp(Number(minCoverage), 0, 1);
 
-  // dotGain: >1 = darker midtones, <1 = lighter
   const dg = clamp(Number(dotGain), 0.6, 2.0);
-
-  // minDot is fraction of half-cell (0..0.6 recommended)
   const minFrac = clamp(Number(minDot), 0, 0.6);
 
   for (let row = 0; row < rows; row++) {
@@ -198,15 +195,17 @@ async function makeColorHalftonePng(inputBuffer, {
       let aSum = 0;
       let solidCount = 0;
       let totalCount = 0;
+      let maxAlphaInCell = 0;
 
       for (let y = y0; y < y1; y++) {
         const rowBase = (y * w) * 4;
         for (let x = x0; x < x1; x++) {
           const idx = rowBase + x * 4;
           const aPx = data[idx + 3];
-          totalCount++;
 
-          // Only treat pixels above threshold as "real" ink pixels
+          totalCount++;
+          if (aPx > maxAlphaInCell) maxAlphaInCell = aPx;
+
           if (aPx >= aThresh) {
             rSum += data[idx];
             gSum += data[idx + 1];
@@ -220,40 +219,35 @@ async function makeColorHalftonePng(inputBuffer, {
       if (!totalCount) continue;
       if (solidCount <= 0) continue;
 
+      // Extra guard: if even the strongest pixel is below threshold, skip.
+      if (maxAlphaInCell < aThresh) continue;
+
       const coverage = solidCount / totalCount;
 
-      // If this cell is mostly faint edge pixels, skip it.
-      // This is the key for preventing DTF white haze/halo.
+      // Primary DTF guard: skip faint edge/shadow spread cells
       if (coverage < covMin) continue;
 
       const r = Math.round(rSum / solidCount);
       const g = Math.round(gSum / solidCount);
       const b = Math.round(bSum / solidCount);
 
-      // Determine alpha of the dot
       let outAlpha;
       if (alphaMode === "average") {
         outAlpha = Math.round(aSum / solidCount);
       } else {
-        // binary (DTF recommended)
-        outAlpha = 255;
+        outAlpha = 255; // binary (DTF-safe)
       }
-
-      // If somehow ends up zero, skip
       if (outAlpha <= 0) continue;
 
       const lum = luminance255(r, g, b);
       let darkness = 1 - lum / 255;
 
-      // Dot gain curve: dg>1 boosts midtones/shadows (darker)
-      // We use exponent 1/dg to increase darkness when dg>1.
+      // Dot gain: dg>1 makes midtones/shadows darker (more coverage)
       darkness = Math.pow(darkness, 1 / dg);
 
-      // Convert to radius fraction with a minimum dot floor
       const frac = clamp(minFrac + (1 - minFrac) * darkness, 0, 1);
       const radius = half * frac;
 
-      // Skip only truly tiny dots (keep low so highlights still print if minDot>0)
       if (radius < 0.15) continue;
 
       const cx = x0 + (x1 - x0) / 2;
@@ -360,9 +354,9 @@ const ProcessRequest = z.object({
   dotGain: z.number().min(0.6).max(2.0).default(1.25),
   minDot: z.number().min(0.0).max(0.6).default(0.18),
 
-  // DTF controls
-  alphaThreshold: z.number().int().min(0).max(255).default(32),
-  minCoverage: z.number().min(0).max(1).default(0.15),
+  // DTF controls (UPDATED defaults: stronger to prevent haze)
+  alphaThreshold: z.number().int().min(0).max(255).default(80),
+  minCoverage: z.number().min(0).max(1).default(0.25),
   alphaMode: z.enum(["binary", "average"]).default("binary"),
 });
 
@@ -460,10 +454,8 @@ app.post("/v1/halftone/process", async (req, res) => {
       cellSize,
       maxWidth: maxWidthClamped,
       dotShape,
-
       dotGain,
       minDot,
-
       alphaThreshold,
       minCoverage,
       alphaMode

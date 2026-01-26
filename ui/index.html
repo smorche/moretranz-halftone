@@ -115,21 +115,29 @@
           </div>
         </div>
 
-        <details style="margin-top:12px;">
+        <details style="margin-top:12px;" open>
           <summary style="cursor:pointer;font-weight:600;">Advanced (masking thresholds)</summary>
 
           <div class="grid2" style="margin-top:10px;">
             <div>
-              <label>Alpha threshold: <span id="alphaThresholdVal">48</span></label>
-              <input id="alphaThreshold" type="range" min="1" max="255" step="1" value="48" />
+              <label>Alpha threshold: <span id="alphaThresholdVal">200</span></label>
+              <input id="alphaThreshold" type="range" min="1" max="255" step="1" value="200" />
               <div class="muted">Only pixels with alpha ≥ this are treated as “real art”.</div>
             </div>
 
             <div>
-              <label>Min coverage: <span id="minCoverageVal">0.20</span></label>
-              <input id="minCoverage" type="range" min="0.00" max="0.80" step="0.01" value="0.20" />
+              <label>Min coverage: <span id="minCoverageVal">0.35</span></label>
+              <input id="minCoverage" type="range" min="0.00" max="0.80" step="0.01" value="0.35" />
               <div class="muted">Cell must have this % of “real art” pixels to emit a dot.</div>
             </div>
+          </div>
+
+          <div class="toggleRow" style="margin-top:10px;">
+            <div>
+              <div style="font-weight:700;">Auto tighten alpha</div>
+              <div class="muted">If file has “dirty alpha”, server will raise threshold automatically.</div>
+            </div>
+            <input id="autoTightenAlpha" type="checkbox" checked />
           </div>
         </details>
 
@@ -190,6 +198,7 @@
       const minCoverage = $("minCoverage");
       const alphaThresholdVal = $("alphaThresholdVal");
       const minCoverageVal = $("minCoverageVal");
+      const autoTightenAlpha = $("autoTightenAlpha");
 
       const DEFAULTS = {
         dotShape: "circle",
@@ -199,8 +208,9 @@
         dtfSafe: true,
         dotGain: 1.35,
         minDot: 0.18,
-        alphaThreshold: 48,
-        minCoverage: 0.20,
+        alphaThreshold: 200,
+        minCoverage: 0.35,
+        autoTightenAlpha: true,
       };
 
       cellSize.addEventListener("input", () => (cellSizeVal.textContent = cellSize.value));
@@ -280,6 +290,7 @@
         minDot.value = DEFAULTS.minDot;
         alphaThreshold.value = DEFAULTS.alphaThreshold;
         minCoverage.value = DEFAULTS.minCoverage;
+        autoTightenAlpha.checked = DEFAULTS.autoTightenAlpha;
 
         cellSizeVal.textContent = DEFAULTS.cellSize;
         maxWidthVal.textContent = DEFAULTS.maxWidth;
@@ -348,8 +359,8 @@
             alphaThreshold: Number(alphaThreshold.value),
             minCoverage: Number(minCoverage.value),
 
-            // DTF safe mode forces binary alpha
             alphaMode: dtfSafe.checked ? "binary" : "average",
+            autoTightenAlpha: autoTightenAlpha.checked,
           };
 
           const procResp = await fetchWithRetry(`${base}/v1/halftone/process`, {
@@ -377,7 +388,14 @@
           setStatus("Done ✅", "ok");
 
           const perf = proc.perf ? `\nms: ${proc.perf.ms}\ncells: ${proc.perf.cellCount}\nout: ${proc.perf.outWidth}x${proc.perf.outHeight}` : "";
-          setDebug(`uploadKey: ${up.key}\noutputKey: ${proc.outputKey || "(not provided)"}\nparams: ${JSON.stringify(proc.params || payload)}${perf}`);
+          const used = proc?.params?.alphaThresholdUsed != null
+            ? `\nalphaThresholdUsed: ${proc.params.alphaThresholdUsed} (autoTightened: ${proc.params.autoTightened})`
+            : "";
+
+          setDebug(
+            `uploadKey: ${up.key}\noutputKey: ${proc.outputKey || "(not provided)"}\n` +
+            `params: ${JSON.stringify(proc.params || payload)}${used}${perf}`
+          );
 
         } catch (err) {
           setStatus(friendlyNetworkError(err), "err");

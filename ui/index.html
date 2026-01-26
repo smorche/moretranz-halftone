@@ -16,7 +16,6 @@
       @media (max-width: 980px) { .layout { grid-template-columns: 1fr; } }
 
       .card { border: 1px solid #ddd; border-radius: 12px; padding: 16px; background: #fff; }
-
       .previewCol { position: sticky; top: 16px; }
       @media (max-width: 980px) { .previewCol { position: static; } }
 
@@ -25,6 +24,7 @@
       select, input[type="file"], input[type="text"], button { width: 100%; padding: 10px; font-size: 14px; box-sizing: border-box; }
       button { cursor: pointer; }
       button:disabled { opacity: .6; cursor: not-allowed; }
+
       .muted { color:#666; font-size: 12px; line-height: 1.35; }
       .ok { color: #0a7a0a; }
       .err { color: #b00020; white-space: pre-wrap; }
@@ -49,7 +49,6 @@
         background: repeating-conic-gradient(#f6f6f6 0% 25%, #ffffff 0% 50%) 50% / 16px 16px;
         padding: 8px;
       }
-
       img {
         display:block;
         width: 100%;
@@ -120,24 +119,16 @@
 
           <div class="grid2" style="margin-top:10px;">
             <div>
-              <label>Alpha threshold: <span id="alphaThresholdVal">200</span></label>
-              <input id="alphaThreshold" type="range" min="1" max="255" step="1" value="200" />
+              <label>Alpha threshold: <span id="alphaThresholdVal">48</span></label>
+              <input id="alphaThreshold" type="range" min="1" max="255" step="1" value="48" />
               <div class="muted">Only pixels with alpha ≥ this are treated as “real art”.</div>
             </div>
 
             <div>
-              <label>Min coverage: <span id="minCoverageVal">0.35</span></label>
-              <input id="minCoverage" type="range" min="0.00" max="0.80" step="0.01" value="0.35" />
+              <label>Min coverage: <span id="minCoverageVal">0.20</span></label>
+              <input id="minCoverage" type="range" min="0.00" max="0.80" step="0.01" value="0.20" />
               <div class="muted">Cell must have this % of “real art” pixels to emit a dot.</div>
             </div>
-          </div>
-
-          <div class="toggleRow" style="margin-top:10px;">
-            <div>
-              <div style="font-weight:700;">Auto tighten alpha</div>
-              <div class="muted">If file has “dirty alpha”, server will raise threshold automatically.</div>
-            </div>
-            <input id="autoTightenAlpha" type="checkbox" checked />
           </div>
         </details>
 
@@ -198,7 +189,6 @@
       const minCoverage = $("minCoverage");
       const alphaThresholdVal = $("alphaThresholdVal");
       const minCoverageVal = $("minCoverageVal");
-      const autoTightenAlpha = $("autoTightenAlpha");
 
       const DEFAULTS = {
         dotShape: "circle",
@@ -208,9 +198,8 @@
         dtfSafe: true,
         dotGain: 1.35,
         minDot: 0.18,
-        alphaThreshold: 200,
-        minCoverage: 0.35,
-        autoTightenAlpha: true,
+        alphaThreshold: 48,
+        minCoverage: 0.20,
       };
 
       cellSize.addEventListener("input", () => (cellSizeVal.textContent = cellSize.value));
@@ -290,7 +279,6 @@
         minDot.value = DEFAULTS.minDot;
         alphaThreshold.value = DEFAULTS.alphaThreshold;
         minCoverage.value = DEFAULTS.minCoverage;
-        autoTightenAlpha.checked = DEFAULTS.autoTightenAlpha;
 
         cellSizeVal.textContent = DEFAULTS.cellSize;
         maxWidthVal.textContent = DEFAULTS.maxWidth;
@@ -352,15 +340,11 @@
             cellSize: Number(cellSize.value),
             maxWidth: Number(maxWidth.value),
             dotShape: dotShape.value,
-
             dotGain: Number(dotGain.value),
             minDot: Number(minDot.value),
-
             alphaThreshold: Number(alphaThreshold.value),
             minCoverage: Number(minCoverage.value),
-
             alphaMode: dtfSafe.checked ? "binary" : "average",
-            autoTightenAlpha: autoTightenAlpha.checked,
           };
 
           const procResp = await fetchWithRetry(`${base}/v1/halftone/process`, {
@@ -388,15 +372,7 @@
           setStatus("Done ✅", "ok");
 
           const perf = proc.perf ? `\nms: ${proc.perf.ms}\ncells: ${proc.perf.cellCount}\nout: ${proc.perf.outWidth}x${proc.perf.outHeight}` : "";
-          const used = proc?.params?.alphaThresholdUsed != null
-            ? `\nalphaThresholdUsed: ${proc.params.alphaThresholdUsed} (autoTightened: ${proc.params.autoTightened})`
-            : "";
-
-          setDebug(
-            `uploadKey: ${up.key}\noutputKey: ${proc.outputKey || "(not provided)"}\n` +
-            `params: ${JSON.stringify(proc.params || payload)}${used}${perf}`
-          );
-
+          setDebug(`uploadKey: ${up.key}\noutputKey: ${proc.outputKey || "(not provided)"}${perf}`);
         } catch (err) {
           setStatus(friendlyNetworkError(err), "err");
         } finally {
@@ -407,9 +383,11 @@
 
       dlBtn.addEventListener("click", async () => {
         if (!lastDownloadUrl) return;
+
         try {
           const resp = await fetchWithRetry(lastDownloadUrl, {}, { tries: 2, delayMs: 500 });
           const blob = await resp.blob();
+
           const a = document.createElement("a");
           a.href = URL.createObjectURL(blob);
           a.download = "halftone.png";

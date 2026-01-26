@@ -7,6 +7,8 @@ import sharp from "sharp";
 import { S3Client, PutObjectCommand, GetObjectCommand, HeadObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
+const BUILD_ID = process.env.BUILD_ID || `dev_${new Date().toISOString()}`;
+
 const app = express();
 app.use(express.json({ limit: "1mb" }));
 
@@ -121,23 +123,20 @@ function tooBusyResponse(res) {
 }
 
 /**
- * Full-color halftone tuned for DTF:
- * - Use ONLY pixels with alpha >= alphaThreshold as "solid"
- * - Skip cells with coverage < minCoverage
- * - Extra guard: require maxAlphaInCell >= alphaThreshold (prevents stray faint pixels)
- * - In binary mode, output dot opacity is 1.0 (fully opaque) or dot is absent.
- * - Dot size uses dotGain curve + minDot floor for darker prints.
+ * Halftone generator with DTF-safe alpha handling:
+ * - Build a hard alpha mask: maskPx = (alpha > alphaThreshold)
+ * - Cell emits dots only if mask coverage >= minCoverage
+ * - Sample RGB only from masked pixels (true “ink pixels”)
+ * - alphaMode=binary => output alpha hardened to 0/255 (DTF safe)
  */
 async function makeColorHalftonePng(inputBuffer, {
   cellSize,
   maxWidth,
   dotShape,
 
-  // Darkness controls
   dotGain,
   minDot,
 
-  // DTF controls
   alphaThreshold,
   minCoverage,
   alphaMode
@@ -153,7 +152,6 @@ async function makeColorHalftonePng(inputBuffer, {
   }
 
   const targetW = clamp(Math.min(meta.width, maxWidth), 256, HARD_MAX_WIDTH);
-
   const resized = base.resize({ width: targetW, withoutEnlargement: true });
 
   const rMeta = await resized.metadata();
@@ -174,14 +172,22 @@ async function makeColorHalftonePng(inputBuffer, {
 
   const { data } = await resized.ensureAlpha().raw().toBuffer({ resolveWithObject: true });
 
-  const half = cs / 2;
-  const shapes = [];
-
-  const aThresh = clamp(Math.floor(alphaThreshold), 0, 255);
+  // Effective thresholds (DTF-friendly guardrails)
+  // - alphaThreshold must be >= 1 so alpha=0 never counts
+  const aThresh = clamp(Math.floor(alphaThreshold), 1, 255);
   const covMin = clamp(Number(minCoverage), 0, 1);
 
   const dg = clamp(Number(dotGain), 0.6, 2.0);
   const minFrac = clamp(Number(minDot), 0, 0.6);
+
+  // Precompute alpha mask: 1 byte per pixel
+  const mask = new Uint8Array(w * h);
+  for (let i = 0, p = 0; i < data.length; i += 4, p++) {
+    mask[p] = data[i + 3] > aThresh ? 1 : 0;
+  }
+
+  const half = cs / 2;
+  const shapes = [];
 
   for (let row = 0; row < rows; row++) {
     const y0 = row * cs;
@@ -192,57 +198,38 @@ async function makeColorHalftonePng(inputBuffer, {
       const x1 = Math.min(x0 + cs, w);
 
       let rSum = 0, gSum = 0, bSum = 0;
-      let aSum = 0;
-      let solidCount = 0;
+      let maskedCount = 0;
       let totalCount = 0;
-      let maxAlphaInCell = 0;
 
       for (let y = y0; y < y1; y++) {
-        const rowBase = (y * w) * 4;
+        const rowBasePx = y * w;
+        const rowBaseByte = rowBasePx * 4;
         for (let x = x0; x < x1; x++) {
-          const idx = rowBase + x * 4;
-          const aPx = data[idx + 3];
-
           totalCount++;
-          if (aPx > maxAlphaInCell) maxAlphaInCell = aPx;
+          const p = rowBasePx + x;
+          if (mask[p] === 0) continue;
 
-          if (aPx >= aThresh) {
-            rSum += data[idx];
-            gSum += data[idx + 1];
-            bSum += data[idx + 2];
-            aSum += aPx;
-            solidCount++;
-          }
+          const idx = rowBaseByte + x * 4;
+          rSum += data[idx];
+          gSum += data[idx + 1];
+          bSum += data[idx + 2];
+          maskedCount++;
         }
       }
 
-      if (!totalCount) continue;
-      if (solidCount <= 0) continue;
+      if (!totalCount || maskedCount <= 0) continue;
 
-      // Extra guard: if even the strongest pixel is below threshold, skip.
-      if (maxAlphaInCell < aThresh) continue;
-
-      const coverage = solidCount / totalCount;
-
-      // Primary DTF guard: skip faint edge/shadow spread cells
+      const coverage = maskedCount / totalCount;
       if (coverage < covMin) continue;
 
-      const r = Math.round(rSum / solidCount);
-      const g = Math.round(gSum / solidCount);
-      const b = Math.round(bSum / solidCount);
-
-      let outAlpha;
-      if (alphaMode === "average") {
-        outAlpha = Math.round(aSum / solidCount);
-      } else {
-        outAlpha = 255; // binary (DTF-safe)
-      }
-      if (outAlpha <= 0) continue;
+      const r = Math.round(rSum / maskedCount);
+      const g = Math.round(gSum / maskedCount);
+      const b = Math.round(bSum / maskedCount);
 
       const lum = luminance255(r, g, b);
       let darkness = 1 - lum / 255;
 
-      // Dot gain: dg>1 makes midtones/shadows darker (more coverage)
+      // dot gain curve
       darkness = Math.pow(darkness, 1 / dg);
 
       const frac = clamp(minFrac + (1 - minFrac) * darkness, 0, 1);
@@ -254,7 +241,7 @@ async function makeColorHalftonePng(inputBuffer, {
       const cy = y0 + (y1 - y0) / 2;
 
       const fill = `rgb(${r},${g},${b})`;
-      const fillOpacity = (outAlpha / 255).toFixed(4);
+      const fillOpacity = "1.0000"; // dots are drawn opaque; we harden final alpha for DTF
 
       if (dotShape === "square") {
         const size = radius * 2;
@@ -287,7 +274,26 @@ async function makeColorHalftonePng(inputBuffer, {
   ${shapes.join("")}
 </svg>`;
 
-  const out = await sharp(Buffer.from(svg))
+  // Render SVG to raw RGBA so we can force true binary alpha if requested
+  const rendered = sharp(Buffer.from(svg));
+  const { data: outData, info } = await rendered.ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+
+  if (alphaMode === "binary") {
+    for (let i = 0; i < outData.length; i += 4) {
+      const a = outData[i + 3];
+      if (a === 0) {
+        outData[i] = 0;
+        outData[i + 1] = 0;
+        outData[i + 2] = 0;
+      } else {
+        outData[i + 3] = 255;
+      }
+    }
+  }
+
+  const out = await sharp(outData, {
+    raw: { width: info.width, height: info.height, channels: 4 }
+  })
     .png({ compressionLevel: 9, adaptiveFiltering: true })
     .toBuffer();
 
@@ -298,6 +304,16 @@ async function makeColorHalftonePng(inputBuffer, {
  *  Routes
  *  --------------------------*/
 app.get("/health", (_req, res) => res.json({ ok: true }));
+
+// NEW: version endpoint to confirm deploy
+app.get("/version", (_req, res) => {
+  res.json({
+    ok: true,
+    buildId: BUILD_ID,
+    server: "moretranz-halftone",
+    alphaMaskMode: "precomputed-mask",
+  });
+});
 
 const UploadUrlRequest = z.object({
   filename: z.string().min(1),
@@ -350,13 +366,12 @@ const ProcessRequest = z.object({
   maxWidth: z.number().int().min(256).max(4000).default(2000),
   dotShape: z.enum(["circle", "square", "ellipse"]).default("circle"),
 
-  // Darkness controls
   dotGain: z.number().min(0.6).max(2.0).default(1.25),
   minDot: z.number().min(0.0).max(0.6).default(0.18),
 
-  // DTF controls (UPDATED defaults: stronger to prevent haze)
-  alphaThreshold: z.number().int().min(0).max(255).default(80),
-  minCoverage: z.number().min(0).max(1).default(0.25),
+  // IMPORTANT: default alphaThreshold bumped to 48 for safer backgrounds
+  alphaThreshold: z.number().int().min(0).max(255).default(48),
+  minCoverage: z.number().min(0).max(1).default(0.15),
   alphaMode: z.enum(["binary", "average"]).default("binary"),
 });
 
@@ -368,10 +383,7 @@ app.post("/v1/halftone/process", async (req, res) => {
     );
   }
 
-  if (ACTIVE_JOBS >= MAX_CONCURRENT_JOBS) {
-    return tooBusyResponse(res);
-  }
-
+  if (ACTIVE_JOBS >= MAX_CONCURRENT_JOBS) return tooBusyResponse(res);
   ACTIVE_JOBS++;
 
   const {
@@ -391,10 +403,6 @@ app.post("/v1/halftone/process", async (req, res) => {
   try {
     const started = Date.now();
 
-    if (maxWidthClamped > SOFT_MAX_WIDTH) {
-      logWithReq(req, "HIGH MEMORY REQUEST (soft warning)", { maxWidth: maxWidthClamped, cellSize, dotShape });
-    }
-
     logWithReq(req, "PROCESS PARAMS", {
       key,
       cellSize,
@@ -404,8 +412,13 @@ app.post("/v1/halftone/process", async (req, res) => {
       minDot,
       alphaThreshold,
       minCoverage,
-      alphaMode
+      alphaMode,
+      buildId: BUILD_ID
     });
+
+    if (maxWidthClamped > SOFT_MAX_WIDTH) {
+      logWithReq(req, "HIGH MEMORY REQUEST (soft warning)", { maxWidth: maxWidthClamped, cellSize, dotShape });
+    }
 
     try {
       const head = await s3.send(new HeadObjectCommand({ Bucket: process.env.R2_BUCKET, Key: key }));
@@ -429,8 +442,7 @@ app.post("/v1/halftone/process", async (req, res) => {
     let meta;
     try {
       meta = await sharp(inputBuffer, { failOn: "none" }).metadata();
-    } catch (e) {
-      logWithReq(req, "BAD IMAGE (sharp decode failed):", e?.message || e);
+    } catch {
       return res.status(400).json(errJson("BAD_IMAGE", "Unsupported or corrupted image file"));
     }
 
@@ -480,10 +492,10 @@ app.post("/v1/halftone/process", async (req, res) => {
     );
 
     const ms = Date.now() - started;
-    logWithReq(req, "PROCESS OK", { outputKey, width, height, cellCount, ms });
 
     return res.json({
       ok: true,
+      buildId: BUILD_ID,
       inputKey: key,
       outputKey,
       format: "png",

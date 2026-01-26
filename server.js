@@ -127,7 +127,6 @@ function tooBusyResponse(res) {
 
 /**
  * Render SVG onto a guaranteed transparent canvas.
- * This avoids any surprises where SVG render introduces non-zero alpha outside shapes.
  */
 async function renderSvgToPng({ width, height, svgBuffer }) {
   return sharp({
@@ -144,11 +143,9 @@ async function renderSvgToPng({ width, height, svgBuffer }) {
 }
 
 /**
- * Compute basic alpha stats + a histogram for auto-thresholding.
+ * Compute basic alpha stats (for logs).
  */
-function alphaStatsAndHist(rgba) {
-  const hist = new Uint32Array(256);
-
+function alphaStats(rgba) {
   let nonZero = 0;
   let ge48 = 0;
   let ge100 = 0;
@@ -156,8 +153,6 @@ function alphaStatsAndHist(rgba) {
 
   for (let i = 3; i < rgba.length; i += 4) {
     const a = rgba[i];
-    hist[a]++;
-
     if (a > 0) nonZero++;
     if (a >= 48) ge48++;
     if (a >= 100) ge100++;
@@ -165,42 +160,20 @@ function alphaStatsAndHist(rgba) {
   }
 
   const total = rgba.length / 4;
-  const stats = {
+  return {
     total,
     nonZeroPct: nonZero / total,
     ge48Pct: ge48 / total,
     ge100Pct: ge100 / total,
     ge200Pct: ge200 / total,
   };
-
-  return { stats, hist };
 }
 
 /**
- * Given an alpha histogram, choose a "tight" threshold:
- * - We look for a high percentile among non-zero pixels to isolate truly solid areas.
- * - This is specifically for "dirty alpha" PNGs where the canvas has lots of semi-opaque haze.
- */
-function suggestedTightAlphaThreshold(hist, { percentile = 0.92 } = {}) {
-  let nonZeroTotal = 0;
-  for (let a = 1; a <= 255; a++) nonZeroTotal += hist[a];
-  if (nonZeroTotal === 0) return 255;
-
-  const target = Math.floor(nonZeroTotal * percentile);
-  let acc = 0;
-  for (let a = 1; a <= 255; a++) {
-    acc += hist[a];
-    if (acc >= target) return a;
-  }
-  return 255;
-}
-
-/**
- * DTF-safe halftone:
- * - Build dots from input sampling
- * - Render a color SVG to PNG
- * - Render a *mask SVG* (same dots, solid white) to PNG
- * - Use mask alpha ONLY (binary) so no faint pixel haze can create underbase
+ * Full-color halftone (RGBA-safe) with DTF-safe binary alpha option:
+ * - sample average RGB within alpha-qualified pixels in each cell
+ * - dot radius based on luminance, with dotGain/minDot controls
+ * - binary alpha is produced from a dot mask rendered to PNG, then thresholded
  */
 async function makeColorHalftonePng(inputBuffer, opts) {
   const {
@@ -212,7 +185,6 @@ async function makeColorHalftonePng(inputBuffer, opts) {
     alphaThreshold,
     minCoverage,
     alphaMode, // "binary" | "average"
-    autoTightenAlpha, // boolean
   } = opts;
 
   const base = sharp(inputBuffer, { failOn: "none" });
@@ -244,39 +216,18 @@ async function makeColorHalftonePng(inputBuffer, opts) {
     );
   }
 
-  // raw RGBA pixels
   const { data } = await resized.ensureAlpha().raw().toBuffer({ resolveWithObject: true });
 
-  // alpha stats + hist
-  const { stats, hist } = alphaStatsAndHist(data);
-
-  // log stats for visibility
+  const aStats = alphaStats(data);
   console.log("ALPHA STATS", {
-    total: stats.total,
-    nonZeroPct: stats.nonZeroPct.toFixed(4),
-    ge48Pct: stats.ge48Pct.toFixed(4),
-    ge100Pct: stats.ge100Pct.toFixed(4),
-    ge200Pct: stats.ge200Pct.toFixed(4),
+    total: aStats.total,
+    nonZeroPct: aStats.nonZeroPct.toFixed(4),
+    ge48Pct: aStats.ge48Pct.toFixed(4),
+    ge100Pct: aStats.ge100Pct.toFixed(4),
+    ge200Pct: aStats.ge200Pct.toFixed(4),
   });
 
-  // DTF reality: if most of the image has high alpha, your threshold must be tight.
-  // Auto-tighten when:
-  // - a majority has alpha >= 200 OR
-  // - a majority has alpha >= 100
-  // This matches what your ribbon PNG showed.
-  let aThresh = clamp(Math.floor(alphaThreshold), 1, 255);
-
-  const looksDirtyAlpha =
-    stats.ge200Pct > 0.50 || stats.ge100Pct > 0.65 || stats.ge48Pct > 0.75;
-
-  if (alphaMode === "binary" && autoTightenAlpha && looksDirtyAlpha) {
-    const suggested = suggestedTightAlphaThreshold(hist, { percentile: 0.92 });
-    // We never lower the user threshold, only tighten if suggested is higher.
-    const tightened = Math.max(aThresh, suggested);
-    console.log("AUTO TIGHTEN ALPHA", { aThresh, suggested, tightened });
-    aThresh = clamp(tightened, 1, 255);
-  }
-
+  const aThresh = clamp(Math.floor(alphaThreshold), 1, 255);
   const covMin = clamp(Number(minCoverage), 0, 1);
   const dg = clamp(Number(dotGain), 0.6, 2.0);
   const minFrac = clamp(Number(minDot), 0, 0.6);
@@ -327,10 +278,8 @@ async function makeColorHalftonePng(inputBuffer, opts) {
       const b = Math.round(bSum / solidCount);
 
       let darkness = 1 - luminance255(r, g, b) / 255;
-      // dot gain curve (dg>1 darkens midtones)
       darkness = Math.pow(darkness, 1 / dg);
 
-      // minimum dot floor
       const frac = clamp(minFrac + (1 - minFrac) * darkness, 0, 1);
       const radius = half * frac;
       if (radius < 0.15) continue;
@@ -340,10 +289,8 @@ async function makeColorHalftonePng(inputBuffer, opts) {
 
       const fill = `rgb(${r},${g},${b})`;
 
-      // In "average" mode, opacity follows coverage.
-      // In DTF "binary" mode, opacity is 1 and alpha comes from mask.
-      const fillOpacity =
-        alphaMode === "average" ? clamp(coverage, 0, 1).toFixed(4) : "1";
+      // In average mode, opacity follows coverage; in binary mode alpha comes from mask.
+      const fillOpacity = alphaMode === "average" ? clamp(coverage, 0, 1).toFixed(4) : "1";
 
       if (dotShape === "square") {
         const size = radius * 2;
@@ -354,9 +301,7 @@ async function makeColorHalftonePng(inputBuffer, opts) {
         colorShapes.push(
           `<rect x="${x}" y="${y}" width="${s}" height="${s}" fill="${fill}" fill-opacity="${fillOpacity}" />`
         );
-        maskShapes.push(
-          `<rect x="${x}" y="${y}" width="${s}" height="${s}" fill="white" />`
-        );
+        maskShapes.push(`<rect x="${x}" y="${y}" width="${s}" height="${s}" fill="white" />`);
       } else if (dotShape === "ellipse") {
         const rx = (radius * 1.2).toFixed(2);
         const ry = (radius * 0.85).toFixed(2);
@@ -366,9 +311,7 @@ async function makeColorHalftonePng(inputBuffer, opts) {
         colorShapes.push(
           `<ellipse cx="${cxs}" cy="${cys}" rx="${rx}" ry="${ry}" fill="${fill}" fill-opacity="${fillOpacity}" />`
         );
-        maskShapes.push(
-          `<ellipse cx="${cxs}" cy="${cys}" rx="${rx}" ry="${ry}" fill="white" />`
-        );
+        maskShapes.push(`<ellipse cx="${cxs}" cy="${cys}" rx="${rx}" ry="${ry}" fill="white" />`);
       } else {
         const cxs = cx.toFixed(2);
         const cys = cy.toFixed(2);
@@ -377,9 +320,7 @@ async function makeColorHalftonePng(inputBuffer, opts) {
         colorShapes.push(
           `<circle cx="${cxs}" cy="${cys}" r="${rs}" fill="${fill}" fill-opacity="${fillOpacity}" />`
         );
-        maskShapes.push(
-          `<circle cx="${cxs}" cy="${cys}" r="${rs}" fill="white" />`
-        );
+        maskShapes.push(`<circle cx="${cxs}" cy="${cys}" r="${rs}" fill="white" />`);
       }
     }
   }
@@ -406,35 +347,27 @@ async function makeColorHalftonePng(inputBuffer, opts) {
   });
 
   if (alphaMode === "binary") {
-    // DTF-safe: alpha ONLY comes from mask, binary
+    /**
+     * ✅ Critical fix:
+     * Build the binary mask from dot luminance, not mask alpha.
+     * This prevents tiny background alpha noise from becoming fully opaque
+     * (which caused the “dark rectangle”).
+     */
     const alphaBin = await sharp(maskPng)
       .ensureAlpha()
-      .extractChannel(3)
-      .threshold(1) // any dot pixel => 255
+      .removeAlpha()
+      .greyscale()
+      .threshold(12) // << safer than alpha threshold(1)
       .png()
       .toBuffer();
 
     const rgb = await sharp(colorPng).ensureAlpha().removeAlpha().png().toBuffer();
     const hardened = await sharp(rgb).joinChannel(alphaBin).png().toBuffer();
 
-    return {
-      png: hardened,
-      width: w,
-      height: h,
-      cellCount,
-      alphaThresholdUsed: aThresh,
-      autoTightened: alphaMode === "binary" && autoTightenAlpha && looksDirtyAlpha,
-    };
+    return { png: hardened, width: w, height: h, cellCount };
   }
 
-  return {
-    png: colorPng,
-    width: w,
-    height: h,
-    cellCount,
-    alphaThresholdUsed: aThresh,
-    autoTightened: false,
-  };
+  return { png: colorPng, width: w, height: h, cellCount };
 }
 
 /** ---------------------------
@@ -493,19 +426,15 @@ const ProcessRequest = z.object({
   maxWidth: z.number().int().min(256).max(4000).default(2000),
   dotShape: z.enum(["circle", "square", "ellipse"]).default("circle"),
 
-  // Darkness controls
   dotGain: z.number().min(0.6).max(2.0).default(1.35),
   minDot: z.number().min(0.0).max(0.6).default(0.18),
 
-  // ✅ DTF-safe defaults (tighter)
-  alphaThreshold: z.number().int().min(1).max(255).default(200),
-  minCoverage: z.number().min(0).max(1).default(0.35),
+  // For your test PNG, lower thresholds are fine because background is truly transparent.
+  // Keep user-adjustable for customer variability.
+  alphaThreshold: z.number().int().min(1).max(255).default(48),
+  minCoverage: z.number().min(0).max(1).default(0.20),
 
-  // Output alpha behavior
   alphaMode: z.enum(["binary", "average"]).default("binary"),
-
-  // ✅ Auto tighten alpha if image looks “dirty”
-  autoTightenAlpha: z.boolean().default(true),
 });
 
 app.post("/v1/halftone/process", async (req, res) => {
@@ -529,7 +458,6 @@ app.post("/v1/halftone/process", async (req, res) => {
     alphaThreshold,
     minCoverage,
     alphaMode,
-    autoTightenAlpha,
   } = parsed.data;
 
   const maxWidthClamped = clamp(maxWidth, 256, HARD_MAX_WIDTH);
@@ -538,11 +466,7 @@ app.post("/v1/halftone/process", async (req, res) => {
     const started = Date.now();
 
     if (maxWidthClamped > SOFT_MAX_WIDTH) {
-      logWithReq(req, "HIGH MEMORY REQUEST (soft warning)", {
-        maxWidth: maxWidthClamped,
-        cellSize,
-        dotShape,
-      });
+      logWithReq(req, "HIGH MEMORY REQUEST (soft warning)", { maxWidth: maxWidthClamped, cellSize, dotShape });
     }
 
     logWithReq(req, "PROCESS PARAMS", {
@@ -555,15 +479,12 @@ app.post("/v1/halftone/process", async (req, res) => {
       alphaThreshold,
       minCoverage,
       alphaMode,
-      autoTightenAlpha,
     });
 
     try {
       const head = await s3.send(new HeadObjectCommand({ Bucket: process.env.R2_BUCKET, Key: key }));
       if (typeof head.ContentLength === "number" && head.ContentLength > MAX_UPLOAD_BYTES) {
-        return res
-          .status(413)
-          .json(errJson("TOO_LARGE", `File exceeds max upload size (${MAX_UPLOAD_BYTES} bytes)`));
+        return res.status(413).json(errJson("TOO_LARGE", `File exceeds max upload size (${MAX_UPLOAD_BYTES} bytes)`));
       }
     } catch (e) {
       logWithReq(req, "HeadObject warning:", String(e?.name || e));
@@ -576,9 +497,7 @@ app.post("/v1/halftone/process", async (req, res) => {
 
     if (inputBuffer.length <= 0) return res.status(400).json(errJson("BAD_IMAGE", "Uploaded file is empty"));
     if (inputBuffer.length > MAX_UPLOAD_BYTES) {
-      return res
-        .status(413)
-        .json(errJson("TOO_LARGE", `File exceeds max upload size (${MAX_UPLOAD_BYTES} bytes)`));
+      return res.status(413).json(errJson("TOO_LARGE", `File exceeds max upload size (${MAX_UPLOAD_BYTES} bytes)`));
     }
 
     let meta;
@@ -591,14 +510,10 @@ app.post("/v1/halftone/process", async (req, res) => {
 
     if (!meta.format || !["png", "jpeg", "webp"].includes(meta.format)) {
       return res.status(400).json(
-        errJson("BAD_IMAGE", "Unsupported image format (only PNG, JPG, WEBP)", {
-          format: meta.format || null,
-        })
+        errJson("BAD_IMAGE", "Unsupported image format (only PNG, JPG, WEBP)", { format: meta.format || null })
       );
     }
-    if (!meta.width || !meta.height) {
-      return res.status(400).json(errJson("BAD_IMAGE", "Could not read image dimensions"));
-    }
+    if (!meta.width || !meta.height) return res.status(400).json(errJson("BAD_IMAGE", "Could not read image dimensions"));
 
     const totalPixels = meta.width * meta.height;
     if (totalPixels > MAX_IMAGE_PIXELS) {
@@ -611,18 +526,16 @@ app.post("/v1/halftone/process", async (req, res) => {
       );
     }
 
-    const { png, width, height, cellCount, alphaThresholdUsed, autoTightened } =
-      await makeColorHalftonePng(inputBuffer, {
-        cellSize,
-        maxWidth: maxWidthClamped,
-        dotShape,
-        dotGain,
-        minDot,
-        alphaThreshold,
-        minCoverage,
-        alphaMode,
-        autoTightenAlpha,
-      });
+    const { png, width, height, cellCount } = await makeColorHalftonePng(inputBuffer, {
+      cellSize,
+      maxWidth: maxWidthClamped,
+      dotShape,
+      dotGain,
+      minDot,
+      alphaThreshold,
+      minCoverage,
+      alphaMode,
+    });
 
     const outId = `ht_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
     const outputKey = `outputs/${outId}.png`;
@@ -643,7 +556,7 @@ app.post("/v1/halftone/process", async (req, res) => {
     );
 
     const ms = Date.now() - started;
-    logWithReq(req, "PROCESS OK", { outputKey, width, height, cellCount, ms, alphaThresholdUsed, autoTightened });
+    logWithReq(req, "PROCESS OK", { outputKey, width, height, cellCount, ms });
 
     return res.json({
       ok: true,
@@ -651,19 +564,7 @@ app.post("/v1/halftone/process", async (req, res) => {
       outputKey,
       format: "png",
       transparent: true,
-      params: {
-        cellSize,
-        maxWidth: maxWidthClamped,
-        dotShape,
-        dotGain,
-        minDot,
-        alphaThreshold,
-        minCoverage,
-        alphaMode,
-        autoTightenAlpha,
-        alphaThresholdUsed,
-        autoTightened,
-      },
+      params: { cellSize, maxWidth: maxWidthClamped, dotShape, dotGain, minDot, alphaThreshold, minCoverage, alphaMode },
       perf: { ms, cellCount, outWidth: width, outHeight: height },
       downloadUrl,
     });

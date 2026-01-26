@@ -7,8 +7,6 @@ import sharp from "sharp";
 import { S3Client, PutObjectCommand, GetObjectCommand, HeadObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
-const BUILD_ID = process.env.BUILD_ID || `dev_${new Date().toISOString()}`;
-
 const app = express();
 app.use(express.json({ limit: "1mb" }));
 
@@ -123,11 +121,12 @@ function tooBusyResponse(res) {
 }
 
 /**
- * Halftone generator with DTF-safe alpha handling:
- * - Build a hard alpha mask: maskPx = (alpha > alphaThreshold)
- * - Cell emits dots only if mask coverage >= minCoverage
- * - Sample RGB only from masked pixels (true “ink pixels”)
- * - alphaMode=binary => output alpha hardened to 0/255 (DTF safe)
+ * DTF-safe halftone:
+ * - PREMULTIPLY alpha -> resize -> UNPREMULTIPLY alpha (prevents alpha bleed into transparent bg)
+ * - Sample RGB from only pixels with alpha > threshold
+ * - Require minCoverage of solid pixels to emit a dot (prevents haze)
+ * - alphaMode=binary makes dots fully opaque or absent
+ * - Harden output PNG alpha so it is strictly 0 or 255 in binary mode
  */
 async function makeColorHalftonePng(inputBuffer, {
   cellSize,
@@ -152,7 +151,14 @@ async function makeColorHalftonePng(inputBuffer, {
   }
 
   const targetW = clamp(Math.min(meta.width, maxWidth), 256, HARD_MAX_WIDTH);
-  const resized = base.resize({ width: targetW, withoutEnlargement: true });
+
+  // CRITICAL FIX:
+  // premultiply -> resize -> unpremultiply prevents alpha bleed
+  const resized = base
+    .ensureAlpha()
+    .premultiply()
+    .resize({ width: targetW, withoutEnlargement: true })
+    .unpremultiply();
 
   const rMeta = await resized.metadata();
   const w = rMeta.width;
@@ -170,24 +176,17 @@ async function makeColorHalftonePng(inputBuffer, {
     );
   }
 
-  const { data } = await resized.ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  const { data } = await resized.raw().toBuffer({ resolveWithObject: true });
 
-  // Effective thresholds (DTF-friendly guardrails)
-  // - alphaThreshold must be >= 1 so alpha=0 never counts
+  const half = cs / 2;
+  const shapes = [];
+
+  // Clamp and guard alpha threshold: must be >= 1 to avoid counting alpha=0 pixels
   const aThresh = clamp(Math.floor(alphaThreshold), 1, 255);
   const covMin = clamp(Number(minCoverage), 0, 1);
 
   const dg = clamp(Number(dotGain), 0.6, 2.0);
   const minFrac = clamp(Number(minDot), 0, 0.6);
-
-  // Precompute alpha mask: 1 byte per pixel
-  const mask = new Uint8Array(w * h);
-  for (let i = 0, p = 0; i < data.length; i += 4, p++) {
-    mask[p] = data[i + 3] > aThresh ? 1 : 0;
-  }
-
-  const half = cs / 2;
-  const shapes = [];
 
   for (let row = 0; row < rows; row++) {
     const y0 = row * cs;
@@ -198,38 +197,49 @@ async function makeColorHalftonePng(inputBuffer, {
       const x1 = Math.min(x0 + cs, w);
 
       let rSum = 0, gSum = 0, bSum = 0;
-      let maskedCount = 0;
+      let aSum = 0;
+      let solidCount = 0;
       let totalCount = 0;
 
       for (let y = y0; y < y1; y++) {
-        const rowBasePx = y * w;
-        const rowBaseByte = rowBasePx * 4;
+        const rowBase = (y * w) * 4;
         for (let x = x0; x < x1; x++) {
+          const idx = rowBase + x * 4;
+          const aPx = data[idx + 3];
           totalCount++;
-          const p = rowBasePx + x;
-          if (mask[p] === 0) continue;
 
-          const idx = rowBaseByte + x * 4;
-          rSum += data[idx];
-          gSum += data[idx + 1];
-          bSum += data[idx + 2];
-          maskedCount++;
+          // Only consider pixels with alpha strictly above threshold
+          if (aPx > aThresh) {
+            rSum += data[idx];
+            gSum += data[idx + 1];
+            bSum += data[idx + 2];
+            aSum += aPx;
+            solidCount++;
+          }
         }
       }
 
-      if (!totalCount || maskedCount <= 0) continue;
+      if (!totalCount || solidCount <= 0) continue;
 
-      const coverage = maskedCount / totalCount;
+      const coverage = solidCount / totalCount;
       if (coverage < covMin) continue;
 
-      const r = Math.round(rSum / maskedCount);
-      const g = Math.round(gSum / maskedCount);
-      const b = Math.round(bSum / maskedCount);
+      const r = Math.round(rSum / solidCount);
+      const g = Math.round(gSum / solidCount);
+      const b = Math.round(bSum / solidCount);
+
+      let outAlpha;
+      if (alphaMode === "average") {
+        outAlpha = Math.round(aSum / solidCount);
+        if (outAlpha <= aThresh) continue; // don’t allow “barely there” dots
+      } else {
+        outAlpha = 255; // binary mode
+      }
 
       const lum = luminance255(r, g, b);
       let darkness = 1 - lum / 255;
 
-      // dot gain curve
+      // dotGain: >1 boosts midtones (darker)
       darkness = Math.pow(darkness, 1 / dg);
 
       const frac = clamp(minFrac + (1 - minFrac) * darkness, 0, 1);
@@ -241,7 +251,7 @@ async function makeColorHalftonePng(inputBuffer, {
       const cy = y0 + (y1 - y0) / 2;
 
       const fill = `rgb(${r},${g},${b})`;
-      const fillOpacity = "1.0000"; // dots are drawn opaque; we harden final alpha for DTF
+      const fillOpacity = (outAlpha / 255).toFixed(4);
 
       if (dotShape === "square") {
         const size = radius * 2;
@@ -274,11 +284,12 @@ async function makeColorHalftonePng(inputBuffer, {
   ${shapes.join("")}
 </svg>`;
 
-  // Render SVG to raw RGBA so we can force true binary alpha if requested
-  const rendered = sharp(Buffer.from(svg));
-  const { data: outData, info } = await rendered.ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  // Render SVG -> raw RGBA so we can harden alpha in binary mode
+  const rendered = sharp(Buffer.from(svg)).ensureAlpha();
+  const { data: outData, info } = await rendered.raw().toBuffer({ resolveWithObject: true });
 
   if (alphaMode === "binary") {
+    // Any non-zero alpha becomes 255; zero remains 0
     for (let i = 0; i < outData.length; i += 4) {
       const a = outData[i + 3];
       if (a === 0) {
@@ -304,16 +315,6 @@ async function makeColorHalftonePng(inputBuffer, {
  *  Routes
  *  --------------------------*/
 app.get("/health", (_req, res) => res.json({ ok: true }));
-
-// NEW: version endpoint to confirm deploy
-app.get("/version", (_req, res) => {
-  res.json({
-    ok: true,
-    buildId: BUILD_ID,
-    server: "moretranz-halftone",
-    alphaMaskMode: "precomputed-mask",
-  });
-});
 
 const UploadUrlRequest = z.object({
   filename: z.string().min(1),
@@ -369,8 +370,8 @@ const ProcessRequest = z.object({
   dotGain: z.number().min(0.6).max(2.0).default(1.25),
   minDot: z.number().min(0.0).max(0.6).default(0.18),
 
-  // IMPORTANT: default alphaThreshold bumped to 48 for safer backgrounds
-  alphaThreshold: z.number().int().min(0).max(255).default(48),
+  // NOTE: min 1 guarantees alpha=0 never counts
+  alphaThreshold: z.number().int().min(1).max(255).default(32),
   minCoverage: z.number().min(0).max(1).default(0.15),
   alphaMode: z.enum(["binary", "average"]).default("binary"),
 });
@@ -383,7 +384,10 @@ app.post("/v1/halftone/process", async (req, res) => {
     );
   }
 
-  if (ACTIVE_JOBS >= MAX_CONCURRENT_JOBS) return tooBusyResponse(res);
+  if (ACTIVE_JOBS >= MAX_CONCURRENT_JOBS) {
+    return tooBusyResponse(res);
+  }
+
   ACTIVE_JOBS++;
 
   const {
@@ -403,6 +407,10 @@ app.post("/v1/halftone/process", async (req, res) => {
   try {
     const started = Date.now();
 
+    if (maxWidthClamped > SOFT_MAX_WIDTH) {
+      logWithReq(req, "HIGH MEMORY REQUEST (soft warning)", { maxWidth: maxWidthClamped, cellSize, dotShape });
+    }
+
     logWithReq(req, "PROCESS PARAMS", {
       key,
       cellSize,
@@ -412,13 +420,8 @@ app.post("/v1/halftone/process", async (req, res) => {
       minDot,
       alphaThreshold,
       minCoverage,
-      alphaMode,
-      buildId: BUILD_ID
+      alphaMode
     });
-
-    if (maxWidthClamped > SOFT_MAX_WIDTH) {
-      logWithReq(req, "HIGH MEMORY REQUEST (soft warning)", { maxWidth: maxWidthClamped, cellSize, dotShape });
-    }
 
     try {
       const head = await s3.send(new HeadObjectCommand({ Bucket: process.env.R2_BUCKET, Key: key }));
@@ -442,7 +445,8 @@ app.post("/v1/halftone/process", async (req, res) => {
     let meta;
     try {
       meta = await sharp(inputBuffer, { failOn: "none" }).metadata();
-    } catch {
+    } catch (e) {
+      logWithReq(req, "BAD IMAGE (sharp decode failed):", e?.message || e);
       return res.status(400).json(errJson("BAD_IMAGE", "Unsupported or corrupted image file"));
     }
 
@@ -492,10 +496,10 @@ app.post("/v1/halftone/process", async (req, res) => {
     );
 
     const ms = Date.now() - started;
+    logWithReq(req, "PROCESS OK", { outputKey, width, height, cellCount, ms });
 
     return res.json({
       ok: true,
-      buildId: BUILD_ID,
       inputKey: key,
       outputKey,
       format: "png",

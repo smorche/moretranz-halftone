@@ -30,8 +30,9 @@ for (const k of requiredEnv) {
 const MAX_UPLOAD_BYTES = Number(process.env.MAX_UPLOAD_BYTES || 25 * 1024 * 1024);
 const MAX_IMAGE_PIXELS = Number(process.env.MAX_IMAGE_PIXELS || 50_000_000);
 
-const HARD_MAX_WIDTH = Number(process.env.HARD_MAX_WIDTH || 3600);
+const HARD_MAX_WIDTH = Number(process.env.HARD_MAX_WIDTH || 3600); // 12"@300dpi width
 const SOFT_MAX_WIDTH = Number(process.env.SOFT_MAX_WIDTH || 3200);
+
 const MIN_CELL = Number(process.env.MIN_CELL || 8);
 const MAX_CELL = Number(process.env.MAX_CELL || 30);
 
@@ -115,34 +116,18 @@ app.use((req, _res, next) => {
  *  --------------------------*/
 let ACTIVE_JOBS = 0;
 function tooBusyResponse(res) {
-  return res.status(429).json(
-    errJson("BUSY", "Processor busy. Please wait a moment and try again.")
-  );
+  return res.status(429).json(errJson("BUSY", "Processor busy. Please wait a moment and try again."));
 }
 
 /**
- * Full-color halftone (RGBA-safe) with DTF options:
- * - dot color = sampled RGB
- * - dot radius = based on luminance (darker -> larger dot)
+ * Strength behavior (0..200):
+ * - 100 = baseline
+ * - >100 = darker: midtone curve + bigger dots earlier + slight alpha gain
+ * - <100 = lighter
  *
- * DTF Safe Mode:
- * - input alpha threshold + min coverage (cell mask)
- * - output alpha is hardened to binary to avoid faint pixels (white underbase)
+ * This is designed to *visibly* increase darkness without needing cellSize < 8.
  */
-async function makeColorHalftonePng(
-  inputBuffer,
-  {
-    cellSize,
-    maxWidth,
-    dotShape,
-    dotGain,
-    minDot,
-    dtfSafe,
-    alphaThreshold,
-    minCoverage,
-    outputAlphaCutoff,
-  }
-) {
+async function makeColorHalftonePng(inputBuffer, { cellSize, maxWidth, dotShape, strength }) {
   const base = sharp(inputBuffer, { failOn: "none" });
 
   const meta = await base.metadata();
@@ -167,23 +152,20 @@ async function makeColorHalftonePng(
   const cellCount = cols * rows;
 
   if (cellCount > MAX_CELLS_ESTIMATE) {
-    throw new Error(
-      `Settings too heavy (estimated cells=${cellCount}). Increase cell size or reduce max width.`
-    );
+    throw new Error(`Settings too heavy (estimated cells=${cellCount}). Increase cell size or reduce max width.`);
   }
 
   const { data } = await resized.ensureAlpha().raw().toBuffer({ resolveWithObject: true });
-
   const half = cs / 2;
+
+  // Strength mapping
+  const s = clamp((Number(strength) || 100) / 100, 0, 2);  // 0..2
+  const curveExp = 1 / Math.max(0.35, s);                  // >1 => darker midtones
+  const radiusGain = 0.85 + 0.65 * s;                      // increases dot coverage as strength rises
+  const alphaGain = clamp(0.85 + 0.30 * s, 0, 1.25);        // slight “ink gain” for semi-transparent edges
+  const minDot = 0.28;                                     // allow small dots (helps preserve detail)
+
   const shapes = [];
-
-  const minDotClamped = clamp(Number(minDot), 0, 0.95); // fraction of half
-  const dotGainClamped = clamp(Number(dotGain), 0.1, 3.0);
-
-  const aThr = clamp(Math.floor(alphaThreshold), 0, 255);
-  const covMin = clamp(Number(minCoverage), 0, 1);
-
-  let dots = 0;
 
   for (let row = 0; row < rows; row++) {
     const y0 = row * cs;
@@ -193,74 +175,55 @@ async function makeColorHalftonePng(
       const x0 = col * cs;
       const x1 = Math.min(x0 + cs, w);
 
-      let rSum = 0, gSum = 0, bSum = 0, aSum = 0;
-      let count = 0;
-      let realCount = 0;
+      let rSum = 0, gSum = 0, bSum = 0, aSum = 0, count = 0;
 
       for (let y = y0; y < y1; y++) {
         const rowBase = (y * w) * 4;
         for (let x = x0; x < x1; x++) {
           const idx = rowBase + x * 4;
-          const r = data[idx];
-          const g = data[idx + 1];
-          const b = data[idx + 2];
-          const a = data[idx + 3];
-
+          rSum += data[idx];
+          gSum += data[idx + 1];
+          bSum += data[idx + 2];
+          aSum += data[idx + 3];
           count++;
-
-          if (dtfSafe) {
-            if (a >= aThr) {
-              rSum += r; gSum += g; bSum += b; aSum += a;
-              realCount++;
-            }
-          } else {
-            rSum += r; gSum += g; bSum += b; aSum += a;
-          }
         }
       }
 
       if (!count) continue;
 
-      if (dtfSafe) {
-        const coverage = realCount / count;
-        if (realCount === 0 || coverage < covMin) continue; // do not emit dots outside art
-      }
+      const r = Math.round(rSum / count);
+      const g = Math.round(gSum / count);
+      const b = Math.round(bSum / count);
+      const a = Math.round(aSum / count);
 
-      const denom = dtfSafe ? realCount : count;
-      if (!denom) continue;
+      if (a <= 0) continue;
 
-      const r = Math.round(rSum / denom);
-      const g = Math.round(gSum / denom);
-      const b = Math.round(bSum / denom);
-      const aAvg = Math.round(aSum / denom);
-
-      if (!dtfSafe && aAvg <= 0) continue;
-
-      // Dot size from luminance
       const lum = luminance255(r, g, b);
-      const darkness = 1 - lum / 255;               // 0..1
-      const darknessAdj = clamp(darkness * dotGainClamped, 0, 1);
+      const darkness = 1 - lum / 255;
 
-      // radius: ensures highlights still produce some dot (minDot)
-      const radius = half * clamp(minDotClamped + (1 - minDotClamped) * darknessAdj, 0, 1);
+      // Darker midtones when strength > 100
+      const darknessCurved = clamp(Math.pow(darkness, curveExp), 0, 1);
 
-      // Skip tiny dots
-      if (radius < 0.35) continue;
+      // Coverage curve + gain
+      const coverage = clamp(0.06 + 0.94 * darknessCurved, 0, 1);
+      const radius = half * clamp(coverage * radiusGain, 0, 1);
+
+      if (radius < minDot) continue;
 
       const cx = x0 + (x1 - x0) / 2;
       const cy = y0 + (y1 - y0) / 2;
 
       const fill = `rgb(${r},${g},${b})`;
 
-      // DTF safe: binary-ish alpha at dot level (opaque dot where present)
-      const fillOpacity = dtfSafe ? "1" : (aAvg / 255).toFixed(4);
+      // Slight ink-gain to prevent soft edges from disappearing
+      const op = clamp((a / 255) * alphaGain, 0, 1).toFixed(4);
 
       if (dotShape === "square") {
         const size = radius * 2;
         shapes.push(
           `<rect x="${(cx - size / 2).toFixed(2)}" y="${(cy - size / 2).toFixed(2)}" width="${size.toFixed(
             2
-          )}" height="${size.toFixed(2)}" fill="${fill}" fill-opacity="${fillOpacity}" shape-rendering="geometricPrecision" />`
+          )}" height="${size.toFixed(2)}" fill="${fill}" fill-opacity="${op}" />`
         );
       } else if (dotShape === "ellipse") {
         const rx = radius * 1.2;
@@ -268,17 +231,15 @@ async function makeColorHalftonePng(
         shapes.push(
           `<ellipse cx="${cx.toFixed(2)}" cy="${cy.toFixed(2)}" rx="${rx.toFixed(
             2
-          )}" ry="${ry.toFixed(2)}" fill="${fill}" fill-opacity="${fillOpacity}" shape-rendering="geometricPrecision" />`
+          )}" ry="${ry.toFixed(2)}" fill="${fill}" fill-opacity="${op}" />`
         );
       } else {
         shapes.push(
           `<circle cx="${cx.toFixed(2)}" cy="${cy.toFixed(2)}" r="${radius.toFixed(
             2
-          )}" fill="${fill}" fill-opacity="${fillOpacity}" shape-rendering="geometricPrecision" />`
+          )}" fill="${fill}" fill-opacity="${op}" />`
         );
       }
-
-      dots++;
     }
   }
 
@@ -288,37 +249,11 @@ async function makeColorHalftonePng(
   ${shapes.join("")}
 </svg>`;
 
-  // Render SVG -> PNG (transparent)
-  const renderedPng = await sharp(Buffer.from(svg))
+  const out = await sharp(Buffer.from(svg))
     .png({ compressionLevel: 9, adaptiveFiltering: true })
     .toBuffer();
 
-  if (!dtfSafe) {
-    return { png: renderedPng, width: w, height: h, cellCount, dots };
-  }
-
-  // DTF safe: harden output alpha to binary to prevent faint pixels triggering white
-  const cutoff = clamp(Math.floor(outputAlphaCutoff), 0, 255);
-
-  const alphaBuf = await sharp(renderedPng)
-    .ensureAlpha()
-    .extractChannel(3)
-    .threshold(cutoff)     // <= cutoff -> 0, > cutoff -> 255
-    .raw()
-    .toBuffer();
-
-  const rgbBuf = await sharp(renderedPng)
-    .ensureAlpha()
-    .removeAlpha()
-    .raw()
-    .toBuffer();
-
-  const out = await sharp(rgbBuf, { raw: { width: w, height: h, channels: 3 } })
-    .joinChannel(alphaBuf, { raw: { width: w, height: h, channels: 1 } })
-    .png({ compressionLevel: 9, adaptiveFiltering: true })
-    .toBuffer();
-
-  return { png: out, width: w, height: h, cellCount, dots };
+  return { png: out, width: w, height: h, cellCount };
 }
 
 /** ---------------------------
@@ -336,9 +271,7 @@ app.post("/v1/halftone/upload-url", async (req, res) => {
   try {
     const parsed = UploadUrlRequest.safeParse(req.body);
     if (!parsed.success) {
-      return res.status(400).json(
-        errJson("BAD_REQUEST", "Invalid request", { issues: parsed.error.flatten() })
-      );
+      return res.status(400).json(errJson("BAD_REQUEST", "Invalid request", { issues: parsed.error.flatten() }));
     }
 
     const { filename, contentType, contentLength } = parsed.data;
@@ -372,28 +305,18 @@ app.post("/v1/halftone/upload-url", async (req, res) => {
 
 const ProcessRequest = z.object({
   key: z.string().min(1),
-
   cellSize: z.number().int().min(MIN_CELL).max(MAX_CELL).default(12),
   maxWidth: z.number().int().min(256).max(4000).default(2000),
   dotShape: z.enum(["circle", "square", "ellipse"]).default("circle"),
 
-  // Darkness / detail controls
-  dotGain: z.number().min(0.1).max(3.0).default(1.25),
-  minDot: z.number().min(0.0).max(0.95).default(0.12),
-
-  // DTF-safe alpha controls
-  dtfSafe: z.boolean().default(true),
-  alphaThreshold: z.number().int().min(0).max(255).default(80),
-  minCoverage: z.number().min(0).max(1).default(0.15),
-  outputAlphaCutoff: z.number().int().min(0).max(255).default(24),
+  // Strength: 0..200 (100 baseline)
+  strength: z.number().int().min(0).max(200).default(120),
 });
 
 app.post("/v1/halftone/process", async (req, res) => {
   const parsed = ProcessRequest.safeParse(req.body);
   if (!parsed.success) {
-    return res.status(400).json(
-      errJson("BAD_REQUEST", "Invalid request", { issues: parsed.error.flatten() })
-    );
+    return res.status(400).json(errJson("BAD_REQUEST", "Invalid request", { issues: parsed.error.flatten() }));
   }
 
   if (ACTIVE_JOBS >= MAX_CONCURRENT_JOBS) {
@@ -402,40 +325,17 @@ app.post("/v1/halftone/process", async (req, res) => {
 
   ACTIVE_JOBS++;
 
-  const {
-    key,
-    cellSize,
-    maxWidth,
-    dotShape,
-    dotGain,
-    minDot,
-    dtfSafe,
-    alphaThreshold,
-    minCoverage,
-    outputAlphaCutoff,
-  } = parsed.data;
-
+  const { key, cellSize, maxWidth, dotShape, strength } = parsed.data;
   const maxWidthClamped = clamp(maxWidth, 256, HARD_MAX_WIDTH);
 
   try {
     const started = Date.now();
 
     if (maxWidthClamped > SOFT_MAX_WIDTH) {
-      logWithReq(req, "HIGH MEMORY REQUEST (soft warning)", { maxWidth: maxWidthClamped, cellSize, dotShape });
+      logWithReq(req, "HIGH MEMORY REQUEST (soft warning)", { maxWidth: maxWidthClamped, cellSize, dotShape, strength });
     }
 
-    logWithReq(req, "PROCESS PARAMS", {
-      key,
-      cellSize,
-      maxWidth: maxWidthClamped,
-      dotShape,
-      dotGain,
-      minDot,
-      dtfSafe,
-      alphaThreshold,
-      minCoverage,
-      outputAlphaCutoff,
-    });
+    logWithReq(req, "PROCESS PARAMS", { key, cellSize, maxWidth: maxWidthClamped, dotShape, strength });
 
     try {
       const head = await s3.send(new HeadObjectCommand({ Bucket: process.env.R2_BUCKET, Key: key }));
@@ -465,44 +365,33 @@ app.post("/v1/halftone/process", async (req, res) => {
     }
 
     if (!meta.format || !["png", "jpeg", "webp"].includes(meta.format)) {
-      return res.status(400).json(
-        errJson("BAD_IMAGE", "Unsupported image format (only PNG, JPG, WEBP)", { format: meta.format || null })
-      );
+      return res.status(400).json(errJson("BAD_IMAGE", "Unsupported image format (only PNG, JPG, WEBP)", { format: meta.format || null }));
     }
     if (!meta.width || !meta.height) return res.status(400).json(errJson("BAD_IMAGE", "Could not read image dimensions"));
 
     const totalPixels = meta.width * meta.height;
     if (totalPixels > MAX_IMAGE_PIXELS) {
-      return res.status(413).json(
-        errJson("TOO_LARGE", `Image resolution too large (${totalPixels} pixels)`, {
-          width: meta.width, height: meta.height, maxPixels: MAX_IMAGE_PIXELS
-        })
-      );
+      return res.status(413).json(errJson("TOO_LARGE", `Image resolution too large (${totalPixels} pixels)`, {
+        width: meta.width, height: meta.height, maxPixels: MAX_IMAGE_PIXELS
+      }));
     }
 
-    const { png, width, height, cellCount, dots } = await makeColorHalftonePng(inputBuffer, {
+    const { png, width, height, cellCount } = await makeColorHalftonePng(inputBuffer, {
       cellSize,
       maxWidth: maxWidthClamped,
       dotShape,
-      dotGain,
-      minDot,
-      dtfSafe,
-      alphaThreshold,
-      minCoverage,
-      outputAlphaCutoff,
+      strength
     });
 
     const outId = `ht_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
     const outputKey = `outputs/${outId}.png`;
 
-    await s3.send(
-      new PutObjectCommand({
-        Bucket: process.env.R2_BUCKET,
-        Key: outputKey,
-        Body: png,
-        ContentType: "image/png"
-      })
-    );
+    await s3.send(new PutObjectCommand({
+      Bucket: process.env.R2_BUCKET,
+      Key: outputKey,
+      Body: png,
+      ContentType: "image/png"
+    }));
 
     const downloadUrl = await getSignedUrl(
       s3,
@@ -511,7 +400,7 @@ app.post("/v1/halftone/process", async (req, res) => {
     );
 
     const ms = Date.now() - started;
-    logWithReq(req, "PROCESS OK", { outputKey, width, height, cellCount, dots, ms });
+    logWithReq(req, "PROCESS OK", { outputKey, width, height, cellCount, ms });
 
     return res.json({
       ok: true,
@@ -519,18 +408,8 @@ app.post("/v1/halftone/process", async (req, res) => {
       outputKey,
       format: "png",
       transparent: true,
-      params: {
-        cellSize,
-        maxWidth: maxWidthClamped,
-        dotShape,
-        dotGain,
-        minDot,
-        dtfSafe,
-        alphaThreshold,
-        minCoverage,
-        outputAlphaCutoff,
-      },
-      perf: { ms, cellCount, dots, outWidth: width, outHeight: height },
+      params: { cellSize, maxWidth: maxWidthClamped, dotShape, strength },
+      perf: { ms, cellCount, outWidth: width, outHeight: height },
       downloadUrl
     });
   } catch (e) {

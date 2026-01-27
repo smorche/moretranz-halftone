@@ -5,26 +5,30 @@
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <title>MoreTranz Halftone Tool</title>
     <style>
-      :root { --previewW: 420px; }
-
+      :root {
+        --max-page: 1120px;
+        --preview-col: 440px; /* keeps preview from going full width */
+        --gap: 16px;
+      }
       body {
         font-family: Arial, sans-serif;
-        max-width: 1120px;
         margin: 24px auto;
         padding: 0 16px;
+        max-width: var(--max-page);
       }
 
-      /* Two-column layout: left grows, right stays fixed */
-      .row {
+      .layout {
         display: grid;
-        grid-template-columns: 1fr var(--previewW);
-        gap: 16px;
+        grid-template-columns: 1fr var(--preview-col);
+        gap: var(--gap);
         align-items: start;
       }
 
-      /* Mobile: stack */
+      /* Stack on small screens */
       @media (max-width: 980px) {
-        .row { grid-template-columns: 1fr; }
+        .layout {
+          grid-template-columns: 1fr;
+        }
       }
 
       .card {
@@ -34,40 +38,103 @@
         background: #fff;
       }
 
-      label { display:block; font-size: 14px; margin: 12px 0 6px; font-weight: 600; }
+      .previewCard {
+        position: sticky;
+        top: 16px;
+        align-self: start;
+      }
+      @media (max-width: 980px) {
+        .previewCard {
+          position: static;
+        }
+      }
+
+      label {
+        display: block;
+        font-size: 14px;
+        margin: 12px 0 6px;
+        font-weight: 600;
+      }
+
       input[type="range"] { width: 100%; }
       select, input[type="file"], input[type="text"], button {
-        width: 100%; padding: 10px; font-size: 14px; box-sizing: border-box;
+        width: 100%;
+        padding: 10px;
+        font-size: 14px;
+        box-sizing: border-box;
       }
       button { cursor: pointer; }
       button:disabled { opacity: .6; cursor: not-allowed; }
+
       .muted { color:#666; font-size: 12px; line-height: 1.35; }
       .ok { color: #0a7a0a; }
       .err { color: #b00020; white-space: pre-wrap; }
       .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; font-size: 12px; }
-      .pill { display:inline-block; padding: 3px 8px; border: 1px solid #ddd; border-radius: 999px; font-size: 12px; color:#333; background:#fafafa; }
+      .pill {
+        display:inline-block;
+        padding: 3px 8px;
+        border: 1px solid #ddd;
+        border-radius: 999px;
+        font-size: 12px;
+        color:#333;
+        background:#fafafa;
+      }
+
       .btnRow { display:flex; gap:10px; }
       .btnRow button { width: 100%; }
 
-      /* Preview images: keep within the right column, never stretch wider than card */
-      .previewWrap { display: flex; flex-direction: column; gap: 10px; }
-      img.previewImg {
-        width: 100%;
-        height: auto;
-        display: block;
+      .imgFrame {
         border: 1px solid #eee;
         border-radius: 10px;
+        padding: 10px;
         background: repeating-conic-gradient(#f6f6f6 0% 25%, #ffffff 0% 50%) 50% / 16px 16px;
+        display: flex;
+        justify-content: center;
+      }
+      img.preview {
+        width: 100%;
+        max-width: 380px;          /* prevents full-width blow-up */
+        height: auto;
+        max-height: 420px;         /* keeps preview compact */
+        object-fit: contain;
+        border-radius: 8px;
+        border: 1px solid rgba(0,0,0,.06);
+        background: transparent;
       }
 
-      /* Optional: keep preview visible while scrolling (desktop only) */
-      @media (min-width: 981px) {
-        .sticky { position: sticky; top: 16px; }
+      details {
+        border: 1px solid #eee;
+        border-radius: 10px;
+        padding: 10px;
+        margin-top: 12px;
+        background: #fafafa;
+      }
+      summary {
+        cursor: pointer;
+        font-weight: 700;
       }
 
-      details summary { cursor: pointer; font-weight: 700; margin-top: 10px; }
-      .twoCol { display:grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-      @media (max-width: 520px) { .twoCol { grid-template-columns: 1fr; } }
+      .twoCol {
+        display:grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 12px;
+      }
+      @media (max-width: 520px) {
+        .twoCol { grid-template-columns: 1fr; }
+      }
+
+      .inlineRow {
+        display:flex;
+        align-items:center;
+        justify-content:space-between;
+        gap: 12px;
+        border: 1px solid #eee;
+        border-radius: 10px;
+        padding: 10px;
+        background:#fafafa;
+        margin-top: 12px;
+      }
+      .inlineRow strong { font-size: 14px; }
     </style>
   </head>
   <body>
@@ -78,7 +145,7 @@
       <span class="pill">DTF-safe output (binary alpha)</span>
     </p>
 
-    <div class="row">
+    <div class="layout">
       <!-- LEFT: Controls -->
       <div class="card">
         <h3 style="margin-top:0;">1) Choose image</h3>
@@ -104,41 +171,39 @@
         <input id="maxWidth" type="range" min="500" max="3600" step="50" value="2000" />
         <div class="muted">For 12&quot; @ 300dpi, use 3600. Reduce if performance is slow.</div>
 
-        <div class="card" style="margin-top:14px; background:#fbfbfb;">
-          <div style="display:flex; align-items:center; justify-content:space-between; gap:12px;">
-            <div>
-              <div style="font-weight:700;">DTF Safe Mode</div>
-              <div class="muted">Binary alpha to prevent faint pixels → unwanted white underbase.</div>
-            </div>
-            <input id="dtfSafe" type="checkbox" checked style="width:18px;height:18px;" />
+        <div class="inlineRow">
+          <div>
+            <strong>DTF Safe Mode</strong>
+            <div class="muted">Binary alpha to prevent faint pixels → unwanted white underbase.</div>
           </div>
+          <input id="dtfSafe" type="checkbox" checked />
         </div>
 
         <div class="twoCol" style="margin-top:12px;">
           <div>
             <label>Darkness (dot gain): <span id="dotGainVal">1.35</span></label>
-            <input id="dotGain" type="range" min="0.70" max="2.50" step="0.05" value="1.35" />
+            <input id="dotGain" type="range" min="0.60" max="2.20" step="0.05" value="1.35" />
             <div class="muted">Higher = darker (more dot coverage).</div>
           </div>
           <div>
             <label>Min dot: <span id="minDotVal">0.12</span></label>
-            <input id="minDot" type="range" min="0.05" max="0.35" step="0.01" value="0.12" />
+            <input id="minDot" type="range" min="0.00" max="0.35" step="0.01" value="0.12" />
             <div class="muted">Keeps highlights printing (small dots).</div>
           </div>
         </div>
 
-        <details style="margin-top:10px;">
+        <details>
           <summary>Advanced (masking thresholds)</summary>
           <div class="twoCol" style="margin-top:10px;">
             <div>
               <label>Alpha threshold: <span id="alphaThrVal">48</span></label>
-              <input id="alphaThr" type="range" min="0" max="254" step="1" value="48" />
-              <div class="muted">Pixels with alpha ≤ this are treated as background.</div>
+              <input id="alphaThr" type="range" min="0" max="220" step="1" value="48" />
+              <div class="muted">Pixels with alpha ≤ this are treated as background (DTF safe).</div>
             </div>
             <div>
               <label>Min coverage: <span id="minCovVal">0.20</span></label>
-              <input id="minCov" type="range" min="0" max="1" step="0.05" value="0.20" />
-              <div class="muted">Cell must contain this % of “real” pixels to emit a dot.</div>
+              <input id="minCov" type="range" min="0" max="0.80" step="0.01" value="0.20" />
+              <div class="muted">Cell must have this fraction of “real” pixels to emit a dot.</div>
             </div>
           </div>
         </details>
@@ -156,17 +221,24 @@
       </div>
 
       <!-- RIGHT: Preview -->
-      <div class="card sticky">
+      <div class="card previewCard">
         <h3 style="margin-top:0;">Preview</h3>
 
-        <div class="previewWrap">
-          <div class="muted">Original</div>
-          <img id="origPreview" class="previewImg" alt="" />
+        <div class="muted" style="margin-bottom:6px;">Original</div>
+        <div class="imgFrame">
+          <img id="origPreview" class="preview" alt="" />
+        </div>
 
-          <div class="muted" style="margin-top:6px;">Halftone output</div>
-          <img id="outPreview" class="previewImg" alt="" />
+        <div style="height:12px;"></div>
 
-          <button id="download" style="margin-top:6px;" disabled>Download PNG</button>
+        <div class="muted" style="margin-bottom:6px;">Halftone output</div>
+        <div class="imgFrame">
+          <img id="outPreview" class="preview" alt="" />
+        </div>
+
+        <button id="download" style="margin-top:12px;" disabled>Download PNG</button>
+        <div class="muted" style="margin-top:8px;">
+          If you see dots outside the artwork: increase <b>Alpha threshold</b> or <b>Min coverage</b>.
         </div>
       </div>
     </div>
@@ -188,6 +260,7 @@
       const cellSize = $("cellSize");
       const maxWidth = $("maxWidth");
       const dotShape = $("dotShape");
+
       const dtfSafe = $("dtfSafe");
       const dotGain = $("dotGain");
       const minDot = $("minDot");
@@ -206,11 +279,12 @@
         cellSize: 12,
         maxWidth: 2000,
         apiBase: "https://moretranz-halftone.onrender.com",
+
         dtfSafe: true,
         dotGain: 1.35,
         minDot: 0.12,
         alphaThreshold: 48,
-        minCoverage: 0.20
+        minCoverage: 0.20,
       };
 
       function syncLabels() {
@@ -222,9 +296,12 @@
         minCovVal.textContent = Number(minCov.value).toFixed(2);
       }
 
-      [cellSize, maxWidth, dotGain, minDot, alphaThr, minCov].forEach((el) =>
-        el.addEventListener("input", syncLabels)
-      );
+      cellSize.addEventListener("input", syncLabels);
+      maxWidth.addEventListener("input", syncLabels);
+      dotGain.addEventListener("input", syncLabels);
+      minDot.addEventListener("input", syncLabels);
+      alphaThr.addEventListener("input", syncLabels);
+      minCov.addEventListener("input", syncLabels);
 
       let lastDownloadUrl = null;
 
@@ -327,6 +404,7 @@
         dlBtn.disabled = true;
 
         try {
+          // 1) get upload URL
           const upResp = await fetchWithRetry(`${base}/v1/halftone/upload-url`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -344,6 +422,7 @@
 
           const up = await upResp.json();
 
+          // 2) PUT the file to R2
           const putResp = await fetchWithRetry(up.uploadUrl, {
             method: "PUT",
             headers: up.headers || { "Content-Type": f.type },
@@ -355,6 +434,7 @@
             throw new Error(`R2 PUT failed (${putResp.status}): ${txt || "no body"}`);
           }
 
+          // 3) process
           const procResp = await fetchWithRetry(`${base}/v1/halftone/process`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -367,9 +447,8 @@
               dtfSafe: !!dtfSafe.checked,
               dotGain: Number(dotGain.value),
               minDot: Number(minDot.value),
-
               alphaThreshold: Number(alphaThr.value),
-              minCoverage: Number(minCov.value)
+              minCoverage: Number(minCov.value),
             })
           }, { tries: 2, delayMs: 900 });
 
@@ -385,6 +464,7 @@
           }
 
           const proc = await procResp.json();
+
           if (!proc.downloadUrl) {
             throw new Error(`process response missing downloadUrl: ${JSON.stringify(proc, null, 2)}`);
           }

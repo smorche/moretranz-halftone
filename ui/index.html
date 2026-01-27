@@ -5,136 +5,22 @@
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <title>MoreTranz Halftone Tool</title>
     <style>
-      :root {
-        --max-page: 1120px;
-        --preview-col: 440px; /* keeps preview from going full width */
-        --gap: 16px;
-      }
-      body {
-        font-family: Arial, sans-serif;
-        margin: 24px auto;
-        padding: 0 16px;
-        max-width: var(--max-page);
-      }
-
-      .layout {
-        display: grid;
-        grid-template-columns: 1fr var(--preview-col);
-        gap: var(--gap);
-        align-items: start;
-      }
-
-      /* Stack on small screens */
-      @media (max-width: 980px) {
-        .layout {
-          grid-template-columns: 1fr;
-        }
-      }
-
-      .card {
-        border: 1px solid #ddd;
-        border-radius: 12px;
-        padding: 16px;
-        background: #fff;
-      }
-
-      .previewCard {
-        position: sticky;
-        top: 16px;
-        align-self: start;
-      }
-      @media (max-width: 980px) {
-        .previewCard {
-          position: static;
-        }
-      }
-
-      label {
-        display: block;
-        font-size: 14px;
-        margin: 12px 0 6px;
-        font-weight: 600;
-      }
-
+      body { font-family: Arial, sans-serif; max-width: 920px; margin: 24px auto; padding: 0 16px; }
+      .row { display: flex; gap: 16px; flex-wrap: wrap; align-items: flex-start; }
+      .card { border: 1px solid #ddd; border-radius: 12px; padding: 16px; background: #fff; }
+      label { display:block; font-size: 14px; margin: 12px 0 6px; font-weight: 600; }
       input[type="range"] { width: 100%; }
-      select, input[type="file"], input[type="text"], button {
-        width: 100%;
-        padding: 10px;
-        font-size: 14px;
-        box-sizing: border-box;
-      }
+      select, input[type="file"], input[type="text"], button { width: 100%; padding: 10px; font-size: 14px; box-sizing: border-box; }
       button { cursor: pointer; }
       button:disabled { opacity: .6; cursor: not-allowed; }
-
       .muted { color:#666; font-size: 12px; line-height: 1.35; }
+      img { max-width: 100%; border: 1px solid #eee; border-radius: 10px; background: repeating-conic-gradient(#f6f6f6 0% 25%, #ffffff 0% 50%) 50% / 16px 16px; }
       .ok { color: #0a7a0a; }
       .err { color: #b00020; white-space: pre-wrap; }
       .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; font-size: 12px; }
-      .pill {
-        display:inline-block;
-        padding: 3px 8px;
-        border: 1px solid #ddd;
-        border-radius: 999px;
-        font-size: 12px;
-        color:#333;
-        background:#fafafa;
-      }
-
+      .pill { display:inline-block; padding: 3px 8px; border: 1px solid #ddd; border-radius: 999px; font-size: 12px; color:#333; background:#fafafa; }
       .btnRow { display:flex; gap:10px; }
       .btnRow button { width: 100%; }
-
-      .imgFrame {
-        border: 1px solid #eee;
-        border-radius: 10px;
-        padding: 10px;
-        background: repeating-conic-gradient(#f6f6f6 0% 25%, #ffffff 0% 50%) 50% / 16px 16px;
-        display: flex;
-        justify-content: center;
-      }
-      img.preview {
-        width: 100%;
-        max-width: 380px;          /* prevents full-width blow-up */
-        height: auto;
-        max-height: 420px;         /* keeps preview compact */
-        object-fit: contain;
-        border-radius: 8px;
-        border: 1px solid rgba(0,0,0,.06);
-        background: transparent;
-      }
-
-      details {
-        border: 1px solid #eee;
-        border-radius: 10px;
-        padding: 10px;
-        margin-top: 12px;
-        background: #fafafa;
-      }
-      summary {
-        cursor: pointer;
-        font-weight: 700;
-      }
-
-      .twoCol {
-        display:grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 12px;
-      }
-      @media (max-width: 520px) {
-        .twoCol { grid-template-columns: 1fr; }
-      }
-
-      .inlineRow {
-        display:flex;
-        align-items:center;
-        justify-content:space-between;
-        gap: 12px;
-        border: 1px solid #eee;
-        border-radius: 10px;
-        padding: 10px;
-        background:#fafafa;
-        margin-top: 12px;
-      }
-      .inlineRow strong { font-size: 14px; }
     </style>
   </head>
   <body>
@@ -142,12 +28,10 @@
     <p class="muted" style="margin-top:0;">
       Uploads to Cloudflare R2, processes on Render, returns a downloadable PNG.
       <span class="pill">Tip: 12&quot; @ 300dpi = 3600px</span>
-      <span class="pill">DTF-safe output (binary alpha)</span>
     </p>
 
-    <div class="layout">
-      <!-- LEFT: Controls -->
-      <div class="card">
+    <div class="row">
+      <div class="card" style="flex: 1 1 360px;">
         <h3 style="margin-top:0;">1) Choose image</h3>
         <input id="file" type="file" accept="image/png,image/jpeg,image/webp" />
         <div id="fileInfo" class="muted" style="margin-top:6px;"></div>
@@ -171,42 +55,11 @@
         <input id="maxWidth" type="range" min="500" max="3600" step="50" value="2000" />
         <div class="muted">For 12&quot; @ 300dpi, use 3600. Reduce if performance is slow.</div>
 
-        <div class="inlineRow">
-          <div>
-            <strong>DTF Safe Mode</strong>
-            <div class="muted">Binary alpha to prevent faint pixels → unwanted white underbase.</div>
-          </div>
-          <input id="dtfSafe" type="checkbox" checked />
+        <label style="margin-top:14px;">Strength: <span id="strengthVal">120</span></label>
+        <input id="strength" type="range" min="0" max="200" step="5" value="120" />
+        <div class="muted">
+          100 = baseline. Higher = darker/more dot coverage. (Try 140–180 for richer color.)
         </div>
-
-        <div class="twoCol" style="margin-top:12px;">
-          <div>
-            <label>Darkness (dot gain): <span id="dotGainVal">1.35</span></label>
-            <input id="dotGain" type="range" min="0.60" max="2.20" step="0.05" value="1.35" />
-            <div class="muted">Higher = darker (more dot coverage).</div>
-          </div>
-          <div>
-            <label>Min dot: <span id="minDotVal">0.12</span></label>
-            <input id="minDot" type="range" min="0.00" max="0.35" step="0.01" value="0.12" />
-            <div class="muted">Keeps highlights printing (small dots).</div>
-          </div>
-        </div>
-
-        <details>
-          <summary>Advanced (masking thresholds)</summary>
-          <div class="twoCol" style="margin-top:10px;">
-            <div>
-              <label>Alpha threshold: <span id="alphaThrVal">48</span></label>
-              <input id="alphaThr" type="range" min="0" max="220" step="1" value="48" />
-              <div class="muted">Pixels with alpha ≤ this are treated as background (DTF safe).</div>
-            </div>
-            <div>
-              <label>Min coverage: <span id="minCovVal">0.20</span></label>
-              <input id="minCov" type="range" min="0" max="0.80" step="0.01" value="0.20" />
-              <div class="muted">Cell must have this fraction of “real” pixels to emit a dot.</div>
-            </div>
-          </div>
-        </details>
 
         <label style="margin-top:14px;">API base URL</label>
         <input id="apiBase" class="mono" value="https://moretranz-halftone.onrender.com" />
@@ -220,26 +73,14 @@
         <div id="debug" class="mono muted" style="margin-top:10px;"></div>
       </div>
 
-      <!-- RIGHT: Preview -->
-      <div class="card previewCard">
+      <div class="card" style="flex: 1 1 420px;">
         <h3 style="margin-top:0;">Preview</h3>
-
-        <div class="muted" style="margin-bottom:6px;">Original</div>
-        <div class="imgFrame">
-          <img id="origPreview" class="preview" alt="" />
-        </div>
-
-        <div style="height:12px;"></div>
-
-        <div class="muted" style="margin-bottom:6px;">Halftone output</div>
-        <div class="imgFrame">
-          <img id="outPreview" class="preview" alt="" />
-        </div>
-
+        <div class="muted">Original</div>
+        <img id="origPreview" alt="" />
+        <div style="height:10px;"></div>
+        <div class="muted">Halftone output</div>
+        <img id="outPreview" alt="" />
         <button id="download" style="margin-top:12px;" disabled>Download PNG</button>
-        <div class="muted" style="margin-top:8px;">
-          If you see dots outside the artwork: increase <b>Alpha threshold</b> or <b>Min coverage</b>.
-        </div>
       </div>
     </div>
 
@@ -260,48 +101,23 @@
       const cellSize = $("cellSize");
       const maxWidth = $("maxWidth");
       const dotShape = $("dotShape");
-
-      const dtfSafe = $("dtfSafe");
-      const dotGain = $("dotGain");
-      const minDot = $("minDot");
-      const alphaThr = $("alphaThr");
-      const minCov = $("minCov");
+      const strength = $("strength");
 
       const cellSizeVal = $("cellSizeVal");
       const maxWidthVal = $("maxWidthVal");
-      const dotGainVal = $("dotGainVal");
-      const minDotVal = $("minDotVal");
-      const alphaThrVal = $("alphaThrVal");
-      const minCovVal = $("minCovVal");
+      const strengthVal = $("strengthVal");
 
       const DEFAULTS = {
         dotShape: "circle",
         cellSize: 12,
         maxWidth: 2000,
-        apiBase: "https://moretranz-halftone.onrender.com",
-
-        dtfSafe: true,
-        dotGain: 1.35,
-        minDot: 0.12,
-        alphaThreshold: 48,
-        minCoverage: 0.20,
+        strength: 120,
+        apiBase: "https://moretranz-halftone.onrender.com"
       };
 
-      function syncLabels() {
-        cellSizeVal.textContent = cellSize.value;
-        maxWidthVal.textContent = maxWidth.value;
-        dotGainVal.textContent = Number(dotGain.value).toFixed(2);
-        minDotVal.textContent = Number(minDot.value).toFixed(2);
-        alphaThrVal.textContent = alphaThr.value;
-        minCovVal.textContent = Number(minCov.value).toFixed(2);
-      }
-
-      cellSize.addEventListener("input", syncLabels);
-      maxWidth.addEventListener("input", syncLabels);
-      dotGain.addEventListener("input", syncLabels);
-      minDot.addEventListener("input", syncLabels);
-      alphaThr.addEventListener("input", syncLabels);
-      minCov.addEventListener("input", syncLabels);
+      cellSize.addEventListener("input", () => (cellSizeVal.textContent = cellSize.value));
+      maxWidth.addEventListener("input", () => (maxWidthVal.textContent = maxWidth.value));
+      strength.addEventListener("input", () => (strengthVal.textContent = strength.value));
 
       let lastDownloadUrl = null;
 
@@ -309,15 +125,13 @@
         dotShape.value = DEFAULTS.dotShape;
         cellSize.value = DEFAULTS.cellSize;
         maxWidth.value = DEFAULTS.maxWidth;
+        strength.value = DEFAULTS.strength;
         apiBase.value = DEFAULTS.apiBase;
 
-        dtfSafe.checked = DEFAULTS.dtfSafe;
-        dotGain.value = DEFAULTS.dotGain;
-        minDot.value = DEFAULTS.minDot;
-        alphaThr.value = DEFAULTS.alphaThreshold;
-        minCov.value = DEFAULTS.minCoverage;
+        cellSizeVal.textContent = DEFAULTS.cellSize;
+        maxWidthVal.textContent = DEFAULTS.maxWidth;
+        strengthVal.textContent = DEFAULTS.strength;
 
-        syncLabels();
         setStatus("");
         setDebug("");
       });
@@ -382,8 +196,6 @@
         throw lastErr;
       }
 
-      syncLabels();
-
       goBtn.addEventListener("click", async () => {
         const f = fileEl.files?.[0];
         if (!f) return setStatus("Please choose an image first.", "err");
@@ -394,9 +206,6 @@
         const base = normalizeBaseUrl(apiBase.value);
         if (!base.startsWith("http")) return setStatus("API base URL must start with http/https.", "err");
 
-        const cs = Number(cellSize.value);
-        const mw = Number(maxWidth.value);
-
         setStatus("Working…");
         setDebug("");
         goBtn.disabled = true;
@@ -404,7 +213,6 @@
         dlBtn.disabled = true;
 
         try {
-          // 1) get upload URL
           const upResp = await fetchWithRetry(`${base}/v1/halftone/upload-url`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -422,7 +230,6 @@
 
           const up = await upResp.json();
 
-          // 2) PUT the file to R2
           const putResp = await fetchWithRetry(up.uploadUrl, {
             method: "PUT",
             headers: up.headers || { "Content-Type": f.type },
@@ -434,32 +241,25 @@
             throw new Error(`R2 PUT failed (${putResp.status}): ${txt || "no body"}`);
           }
 
-          // 3) process
           const procResp = await fetchWithRetry(`${base}/v1/halftone/process`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               key: up.key,
-              cellSize: cs,
-              maxWidth: mw,
+              cellSize: Number(cellSize.value),
+              maxWidth: Number(maxWidth.value),
               dotShape: dotShape.value,
-
-              dtfSafe: !!dtfSafe.checked,
-              dotGain: Number(dotGain.value),
-              minDot: Number(minDot.value),
-              alphaThreshold: Number(alphaThr.value),
-              minCoverage: Number(minCov.value),
+              strength: Number(strength.value)
             })
           }, { tries: 2, delayMs: 900 });
 
           if (!procResp.ok) {
             const body = await jsonOrText(procResp);
+
             if (procResp.status === 429) {
-              throw new Error(
-                "Processor busy (429). Wait ~5 seconds and click Generate again.\n\n" +
-                JSON.stringify(body, null, 2)
-              );
+              throw new Error("Processor busy (429). Wait ~5 seconds and click Generate again.\n\n" + JSON.stringify(body, null, 2));
             }
+
             throw new Error(`process failed (${procResp.status}): ${JSON.stringify(body, null, 2)}`);
           }
 
@@ -475,9 +275,7 @@
 
           setStatus("Done ✅", "ok");
 
-          const perf = proc.perf
-            ? `\nms: ${proc.perf.ms}\ncells: ${proc.perf.cellCount}\ndots: ${proc.perf.dots}\nout: ${proc.perf.outWidth}x${proc.perf.outHeight}`
-            : "";
+          const perf = proc.perf ? `\nms: ${proc.perf.ms}\ncells: ${proc.perf.cellCount}\nout: ${proc.perf.outWidth}x${proc.perf.outHeight}` : "";
           setDebug(`uploadKey: ${up.key}\noutputKey: ${proc.outputKey || "(not provided)"}${perf}`);
         } catch (err) {
           setStatus(friendlyNetworkError(err), "err");

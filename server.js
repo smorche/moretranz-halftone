@@ -32,15 +32,22 @@ for (const k of requiredEnv) {
   }
 }
 
+// Upload bytes
 const MAX_UPLOAD_BYTES = Number(process.env.MAX_UPLOAD_BYTES || 25 * 1024 * 1024);
+
+// Pixel guard
 const MAX_IMAGE_PIXELS = Number(process.env.MAX_IMAGE_PIXELS || 50_000_000);
 
+// Halftone limits
 const HARD_MAX_WIDTH = Number(process.env.HARD_MAX_WIDTH || 3600);
 const SOFT_MAX_WIDTH = Number(process.env.SOFT_MAX_WIDTH || 3200);
 const MIN_CELL = Number(process.env.MIN_CELL || 8);
 const MAX_CELL = Number(process.env.MAX_CELL || 30);
 
+// Concurrency guard
 const MAX_CONCURRENT_JOBS = Number(process.env.MAX_CONCURRENT_JOBS || 1);
+
+// Optional: reject super heavy requests by estimate
 const MAX_CELLS_ESTIMATE = Number(process.env.MAX_CELLS_ESTIMATE || 700_000);
 
 function clamp(n, min, max) {
@@ -70,6 +77,7 @@ function sanitizeFilename(name) {
 }
 
 function luminance255(r, g, b) {
+  // sRGB-ish weights; good enough for dot sizing
   return 0.2126 * r + 0.7152 * g + 0.0722 * b;
 }
 
@@ -126,10 +134,15 @@ function tooBusyResponse(res) {
 }
 
 /**
- * Full-color halftone (RGBA-safe, DTF-safe option):
- * - sample per-cell from eligible pixels (alpha > alphaThreshold)
- * - coverage gate (minCoverage) prevents “faint dots” outside art
- * - if dtfSafe: output dots are fully opaque (binary alpha)
+ * DTF-safe full-color halftone:
+ * - sample only "real" pixels (alpha > alphaThreshold) when DTF safe mode is ON
+ * - require a minimum coverage per cell before emitting a dot (reduces edge/halo noise)
+ * - output is transparent PNG
+ * - when DTF safe mode is ON, dots are binary-alpha (opaque dots only)
+ *
+ * Key look knobs:
+ * - dotGain: increases dot coverage (darker output)
+ * - minDot: minimum dot radius fraction of half-cell (keeps highlights from disappearing)
  */
 async function makeColorHalftonePng(
   inputBuffer,
@@ -146,6 +159,7 @@ async function makeColorHalftonePng(
   }
 
   const targetW = clamp(Math.min(meta.width, maxWidth), 256, HARD_MAX_WIDTH);
+
   const resized = base.resize({ width: targetW, withoutEnlargement: true });
 
   const rMeta = await resized.metadata();
@@ -169,12 +183,12 @@ async function makeColorHalftonePng(
   const half = cs / 2;
   const shapes = [];
 
-  // Normalize tunables
-  const dg = clamp(Number(dotGain || 1.35), 0.5, 3.0);
-  const md = clamp(Number(minDot || 0.12), 0.0, 0.6); // fraction of half
-  const aThr = clamp(Number(alphaThreshold ?? 48), 0, 254);
-  const covThr = clamp(Number(minCoverage ?? 0.2), 0, 1);
+  const minDotClamped = clamp(minDot, 0, 0.95);
+  const dotGainClamped = clamp(dotGain, 0.4, 3.0);
+  const alphaThr = clamp(Math.floor(alphaThreshold), 0, 254);
+  const minCov = clamp(minCoverage, 0, 1);
 
+  // Build dots
   for (let row = 0; row < rows; row++) {
     const y0 = row * cs;
     const y1 = Math.min(y0 + cs, h);
@@ -183,62 +197,77 @@ async function makeColorHalftonePng(
       const x0 = col * cs;
       const x1 = Math.min(x0 + cs, w);
 
-      let eligible = 0;
-      let total = 0;
-
-      // Alpha-weighted sums from eligible pixels only
-      let wSum = 0;
-      let rW = 0, gW = 0, bW = 0;
+      let rSum = 0,
+        gSum = 0,
+        bSum = 0,
+        aSum = 0;
+      let count = 0;
+      let realCount = 0;
 
       for (let y = y0; y < y1; y++) {
-        const rowBase = (y * w) * 4;
+        const rowBase = y * w * 4;
         for (let x = x0; x < x1; x++) {
           const idx = rowBase + x * 4;
           const a = data[idx + 3];
-          total++;
 
-          if (a <= aThr) continue;
+          count++;
 
-          eligible++;
-          const wa = a / 255; // weight by alpha (helps antialiased edges)
-          wSum += wa;
-          rW += data[idx] * wa;
-          gW += data[idx + 1] * wa;
-          bW += data[idx + 2] * wa;
+          if (dtfSafe) {
+            // In DTF safe mode, treat low alpha as fully background
+            if (a <= alphaThr) continue;
+
+            realCount++;
+            rSum += data[idx];
+            gSum += data[idx + 1];
+            bSum += data[idx + 2];
+            aSum += a;
+          } else {
+            // Non-DTF mode: average everything (classic behavior)
+            realCount++;
+            rSum += data[idx];
+            gSum += data[idx + 1];
+            bSum += data[idx + 2];
+            aSum += a;
+          }
         }
       }
 
-      if (!eligible || wSum <= 0) continue;
+      if (!count || realCount <= 0) continue;
 
-      const coverage = eligible / total;
+      // If we are near edges with only a few "real" pixels, skip the dot
+      // This prevents faint edge pixels turning into dots that cause unwanted white underbase.
+      if (dtfSafe) {
+        const coverage = realCount / count;
+        if (coverage < minCov) continue;
+      }
 
-      // DTF-safe gating: if the cell is mostly transparent, emit nothing
-      if (dtfSafe && coverage < covThr) continue;
+      const r = Math.round(rSum / realCount);
+      const g = Math.round(gSum / realCount);
+      const b = Math.round(bSum / realCount);
+      const aAvg = Math.round(aSum / realCount);
 
-      const r = Math.round(rW / wSum);
-      const g = Math.round(gW / wSum);
-      const b = Math.round(bW / wSum);
-
+      // Compute darkness from color only (not alpha)
       const lum = luminance255(r, g, b);
       const darkness = 1 - lum / 255;
 
-      // Dot size fraction (of half-cell radius). Keep a minimum dot so highlights still print.
-      // md and dg control darkness/coverage without changing dot color.
-      const frac = clamp(md + dg * darkness, 0, 1);
-      const radius = half * frac;
+      // Dot gain pushes coverage darker; clamp to avoid overshoot.
+      const darknessAdj = clamp(darkness * dotGainClamped, 0, 1);
 
-      // Tiny dot skip (keeps output cleaner). Lower than before so highlights don’t disappear.
-      if (radius < 0.12) continue;
+      // Radius always has a minimum component to keep highlights present.
+      const radius = half * (minDotClamped + (1 - minDotClamped) * darknessAdj);
+
+      // Prevent micro-dots (mostly perf noise)
+      // In DTF mode we allow slightly smaller dots than before to keep highlights printing.
+      const minRadiusPx = dtfSafe ? 0.20 : 0.35;
+      if (radius < minRadiusPx) continue;
 
       const cx = x0 + (x1 - x0) / 2;
       const cy = y0 + (y1 - y0) / 2;
 
       const fill = `rgb(${r},${g},${b})`;
 
-      // Alpha:
-      // - dtfSafe => binary dots (either present or absent)
-      // - non-dtfSafe => scale opacity by coverage (still avoids heavy “faint fog”)
-      const fillOpacity = dtfSafe ? "1" : clamp(coverage, 0, 1).toFixed(4);
+      // DTF safe mode => binary alpha output (opaque dot or nothing)
+      const fillOpacity = dtfSafe ? "1" : (aAvg / 255).toFixed(4);
 
       if (dotShape === "square") {
         const size = radius * 2;
@@ -267,10 +296,9 @@ async function makeColorHalftonePng(
     }
   }
 
-  // IMPORTANT: avoid SVG “transparent” keyword quirks; use explicit rgba(0,0,0,0)
   const svg = `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">
-  <rect width="100%" height="100%" fill="rgba(0,0,0,0)"/>
+  <rect width="100%" height="100%" fill="transparent" />
   ${shapes.join("")}
 </svg>`;
 
@@ -332,16 +360,15 @@ app.post("/v1/halftone/upload-url", async (req, res) => {
 
 const ProcessRequest = z.object({
   key: z.string().min(1),
-
   cellSize: z.number().int().min(MIN_CELL).max(MAX_CELL).default(12),
   maxWidth: z.number().int().min(256).max(4000).default(2000),
   dotShape: z.enum(["circle", "square", "ellipse"]).default("circle"),
 
-  // Darkness tuning (DTF-friendly)
-  dotGain: z.number().min(0.5).max(3.0).default(1.35),
-  minDot: z.number().min(0.0).max(0.6).default(0.12),
+  // Look knobs
+  dotGain: z.number().min(0.4).max(3.0).default(1.35),
+  minDot: z.number().min(0.0).max(0.95).default(0.12),
 
-  // DTF alpha safety
+  // DTF-safe alpha controls
   dtfSafe: z.boolean().default(true),
   alphaThreshold: z.number().int().min(0).max(254).default(48),
   minCoverage: z.number().min(0).max(1).default(0.2),
@@ -355,23 +382,11 @@ app.post("/v1/halftone/process", async (req, res) => {
       .json(errJson("BAD_REQUEST", "Invalid request", { issues: parsed.error.flatten() }));
   }
 
-  if (ACTIVE_JOBS >= MAX_CONCURRENT_JOBS) {
-    return tooBusyResponse(res);
-  }
-
+  if (ACTIVE_JOBS >= MAX_CONCURRENT_JOBS) return tooBusyResponse(res);
   ACTIVE_JOBS++;
 
-  const {
-    key,
-    cellSize,
-    maxWidth,
-    dotShape,
-    dotGain,
-    minDot,
-    dtfSafe,
-    alphaThreshold,
-    minCoverage,
-  } = parsed.data;
+  const { key, cellSize, maxWidth, dotShape, dotGain, minDot, dtfSafe, alphaThreshold, minCoverage } =
+    parsed.data;
 
   const maxWidthClamped = clamp(maxWidth, 256, HARD_MAX_WIDTH);
 
@@ -398,6 +413,7 @@ app.post("/v1/halftone/process", async (req, res) => {
       minCoverage,
     });
 
+    // HeadObject (optional)
     try {
       const head = await s3.send(
         new HeadObjectCommand({ Bucket: process.env.R2_BUCKET, Key: key })
@@ -411,19 +427,20 @@ app.post("/v1/halftone/process", async (req, res) => {
       logWithReq(req, "HeadObject warning:", String(e?.name || e));
     }
 
+    // GetObject
     const obj = await s3.send(new GetObjectCommand({ Bucket: process.env.R2_BUCKET, Key: key }));
     if (!obj.Body) return res.status(404).json(errJson("NOT_FOUND", "Input object not found"));
 
     const inputBuffer = await streamToBuffer(obj.Body);
 
-    if (inputBuffer.length <= 0)
-      return res.status(400).json(errJson("BAD_IMAGE", "Uploaded file is empty"));
+    if (inputBuffer.length <= 0) return res.status(400).json(errJson("BAD_IMAGE", "Uploaded file is empty"));
     if (inputBuffer.length > MAX_UPLOAD_BYTES) {
       return res
         .status(413)
         .json(errJson("TOO_LARGE", `File exceeds max upload size (${MAX_UPLOAD_BYTES} bytes)`));
     }
 
+    // Validate image
     let meta;
     try {
       meta = await sharp(inputBuffer, { failOn: "none" }).metadata();

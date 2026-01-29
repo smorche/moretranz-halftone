@@ -24,64 +24,27 @@ for (const k of requiredEnv) {
 const MAX_UPLOAD_BYTES = Number(process.env.MAX_UPLOAD_BYTES || 25 * 1024 * 1024); // 25MB
 const MAX_IMAGE_PIXELS = Number(process.env.MAX_IMAGE_PIXELS || 50_000_000); // 50MP
 
-// 12" @ 300dpi = 3600px
-const MAX_WIDTH_PX = Number(process.env.MAX_WIDTH_PX || 3600);
+// Allowlisted origins + some safe patterns for local/dev.
+// (This prevents the “CORS blocked for origin …pages.dev” issue you saw in Render logs.)
+const STATIC_ALLOWED_ORIGINS = new Set([
+  "https://moretranz-halftone.pages.dev",
+  "https://moretranz.com",
+  "https://www.moretranz.com",
+]);
 
-// Treat nearly-transparent pixels as background for sampling
-const ALPHA_EPS = Number(process.env.ALPHA_EPS || 8); // 0..255
-
-function reqId() {
-  return crypto.randomBytes(8).toString("hex");
-}
-function errJson(code, message, details) {
-  return { error: { code, message, ...(details ? { details } : {}) } };
-}
-function logWithReq(req, ...args) {
-  console.log(`[${req._rid}]`, ...args);
-}
-
-async function streamToBuffer(stream) {
-  const chunks = [];
-  for await (const chunk of stream) chunks.push(chunk);
-  return Buffer.concat(chunks);
-}
-
-function sanitizeFilename(name) {
-  return name.replace(/[^a-zA-Z0-9._-]/g, "_");
-}
-
-function clamp(n, min, max) {
-  return Math.max(min, Math.min(max, n));
-}
-
-function luminance255(r, g, b) {
-  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
-}
-
-/** ---------------------------
- *  CORS
- *  --------------------------*/
-// Allow:
-// - your Pages app (any *.pages.dev, but we’ll still keep it tight)
-// - moretranz.com
-// - localhost for dev
 function isAllowedOrigin(origin) {
-  if (!origin) return true; // server-to-server / curl
-  if (origin === "https://moretranz.com") return true;
-  if (origin === "https://www.moretranz.com") return true;
+  if (!origin) return true; // server-to-server / curl / Postman
 
-  // Pages domains (your tool lives here)
-  // Examples:
-  //   https://moretranz-halftone.pages.dev
-  //   https://<branch>.<project>.pages.dev (if you ever enable preview deployments)
-  try {
-    const u = new URL(origin);
-    if (u.hostname === "moretranz-halftone.pages.dev") return true;
-    if (u.hostname.endsWith(".pages.dev")) return true;
-    if (u.hostname === "localhost" || u.hostname === "127.0.0.1") return true;
-  } catch {
-    return false;
-  }
+  // exact matches
+  if (STATIC_ALLOWED_ORIGINS.has(origin)) return true;
+
+  // allow local dev
+  if (/^http:\/\/localhost(:\d+)?$/.test(origin)) return true;
+  if (/^http:\/\/127\.0\.0\.1(:\d+)?$/.test(origin)) return true;
+
+  // if Cloudflare Pages preview URLs ever used, allow *.pages.dev
+  if (/^https:\/\/[a-z0-9-]+\.pages\.dev$/.test(origin)) return true;
+
   return false;
 }
 
@@ -110,28 +73,61 @@ const s3 = new S3Client({
 });
 
 /** ---------------------------
- *  Halftone generator (ALPHA-CORRECT)
+ *  Helpers
  *  --------------------------*/
+function reqId() {
+  return crypto.randomBytes(8).toString("hex");
+}
+
+function errJson(code, message, details) {
+  return { error: { code, message, ...(details ? { details } : {}) } };
+}
+
+function logWithReq(req, ...args) {
+  console.log(`[${req._rid}]`, ...args);
+}
+
+async function streamToBuffer(stream) {
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  return Buffer.concat(chunks);
+}
+
+function sanitizeFilename(name) {
+  return name.replace(/[^a-zA-Z0-9._-]/g, "_");
+}
+
+function clamp(n, min, max) {
+  return Math.max(min, Math.min(max, n));
+}
+
+function luminance255(r, g, b) {
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
 /**
- * Full-color halftone:
- * - alpha-weighted sampling (premultiplied) so transparent BG does NOT wash colors
- * - dot radius can slightly exceed cell to avoid "faded" output
- * - "strength" meaningfully increases dot coverage + midtone density
+ * Improved full-color halftone (alpha-safe + stronger strength):
+ * - Resize to targetW
+ * - Downsample to a grid of (cols x rows) where each pixel ~ cell-average
+ * - Alpha-weighted behavior:
+ *     - skip cells with very low alpha coverage
+ *     - dot radius also scales with alpha coverage (prevents faint dots in transparent area)
+ * - Strength:
+ *     - boosts dot coverage via nonlinear curve + radius scaling
+ * - Output is transparent PNG
  */
 async function makeColorHalftonePng(inputBuffer, { cellSize, maxWidth, dotShape, strength }) {
   const base = sharp(inputBuffer, { failOn: "none" });
-
   const meta = await base.metadata();
   if (!meta.width || !meta.height) throw new Error("Could not read image dimensions");
 
   const pixels = meta.width * meta.height;
-  if (pixels > MAX_IMAGE_PIXELS) throw new Error(`Image too large: ${pixels} pixels exceeds limit ${MAX_IMAGE_PIXELS}`);
+  if (pixels > MAX_IMAGE_PIXELS) {
+    throw new Error(`Image too large: ${pixels} pixels exceeds limit ${MAX_IMAGE_PIXELS}`);
+  }
 
-  // Cap to 12" @ 300dpi by default (3600px)
-  const cappedMaxWidth = clamp(Math.floor(maxWidth || MAX_WIDTH_PX), 256, MAX_WIDTH_PX);
-
-  // Resize down to maxWidth (keep aspect)
-  const targetW = Math.min(meta.width, cappedMaxWidth);
+  // Cap width to requested maxWidth (supports 12" @ 300dpi => 3600px)
+  const targetW = Math.min(meta.width, maxWidth);
   const resized = base.resize({ width: targetW, withoutEnlargement: true });
 
   const rMeta = await resized.metadata();
@@ -139,105 +135,73 @@ async function makeColorHalftonePng(inputBuffer, { cellSize, maxWidth, dotShape,
   const h = rMeta.height;
   if (!w || !h) throw new Error("Could not read resized dimensions");
 
-  // Raw RGBA
-  const { data } = await resized.ensureAlpha().raw().toBuffer({ resolveWithObject: true });
-
-  // Cell sizing
   const cs = clamp(Math.floor(cellSize), 4, 80);
   const half = cs / 2;
-
-  // Strength: 100 = baseline; allow up to 220 in UI comfortably
-  // Map strength -> coverage multiplier + curve for midtones
-  const s = clamp(Number(strength ?? 100), 0, 260) / 100; // 0.0 .. 2.6
-  // Higher strength => slightly lower gamma => denser midtones
-  const gamma = clamp(1.0 / (0.85 + 0.55 * s), 0.45, 1.2);
 
   const cols = Math.ceil(w / cs);
   const rows = Math.ceil(h / cs);
 
-  // Build SVG shapes in an array (less memory churn than string concat)
+  // Strength: 100 = baseline
+  // allow up to 250 from UI if you want; clamp for safety.
+  const s = clamp(Number(strength ?? 100), 0, 300);
+  const sFactor = clamp(s / 100, 0, 3); // 0..3
+
+  // Cells with tiny coverage cause the “washed rectangle” problem.
+  // This threshold is the key to keeping the halftone confined to the artwork shape.
+  const MIN_COVERAGE = 0.18; // 18% coverage in the cell
+
+  // Downsample image to grid where each pixel represents a cell’s average.
+  // premultiply/unpremultiply preserves correct edge colors with alpha.
+  const grid = await resized
+    .ensureAlpha()
+    .premultiply()
+    .resize(cols, rows, {
+      fit: "fill",
+      kernel: sharp.kernel.lanczos3,
+    })
+    .unpremultiply()
+    .raw()
+    .toBuffer({ resolveWithObject: false });
+
   const shapes = [];
+  let cellsUsed = 0;
+
+  // Helper for strength curve: higher strength => more dot coverage in midtones
+  // darkness in [0..1]; curve exponent < 1 increases darkness.
+  const curveExp = 1 / (0.85 + 0.55 * sFactor); // strength up => exp down => darker
 
   for (let row = 0; row < rows; row++) {
-    const y0 = row * cs;
-    const y1 = Math.min(y0 + cs, h);
-
     for (let col = 0; col < cols; col++) {
-      const x0 = col * cs;
-      const x1 = Math.min(x0 + cs, w);
+      const idx = (row * cols + col) * 4;
+      const r = grid[idx];
+      const g = grid[idx + 1];
+      const b = grid[idx + 2];
+      const a = grid[idx + 3];
 
-      // Alpha-weighted (premultiplied) sampling:
-      // rSum += r * a, aSum += a, final r = rSum/aSum
-      let rSum = 0,
-        gSum = 0,
-        bSum = 0;
-      let aSum = 0; // sum of alpha in 0..1
-      let aRawSum = 0; // sum of raw alpha 0..255 (for avg alpha)
+      const coverage = a / 255; // 0..1
+      if (coverage <= 0) continue;
 
-      let count = 0;
+      // Skip mostly-transparent cells (prevents faint “rectangle” output)
+      if (coverage < MIN_COVERAGE) continue;
 
-      for (let y = y0; y < y1; y++) {
-        const rowIdx = y * w;
-        for (let x = x0; x < x1; x++) {
-          const idx = (rowIdx + x) * 4;
-          const a255 = data[idx + 3];
-
-          count++;
-
-          // Ignore near-transparent pixels for color sampling to prevent background wash
-          if (a255 <= ALPHA_EPS) continue;
-
-          const a = a255 / 255;
-          aSum += a;
-          aRawSum += a255;
-
-          rSum += data[idx] * a;
-          gSum += data[idx + 1] * a;
-          bSum += data[idx + 2] * a;
-        }
-      }
-
-      if (count === 0) continue;
-
-      // If effectively transparent cell, skip output entirely
-      if (aSum <= 0) continue;
-
-      // Average alpha for edge softness (0..1)
-      const avgAlpha = clamp(aRawSum / (count * 255), 0, 1);
-
-      // Alpha-weighted average color
-      const r = Math.round(rSum / aSum);
-      const g = Math.round(gSum / aSum);
-      const b = Math.round(bSum / aSum);
-
-      // Darkness based on luminance, but with strength curve
       const lum = luminance255(r, g, b); // 0..255
-      const baseDark = 1 - lum / 255; // 0..1
+      const darkness0 = 1 - lum / 255; // 0..1
 
-      // Apply strength multiplier, then gamma curve for midtones
-      let dark = clamp(baseDark * s, 0, 1);
-      dark = Math.pow(dark, gamma);
+      // Strength/contrast curve
+      const darkness = clamp(Math.pow(darkness0, curveExp) * (0.85 + 0.65 * sFactor), 0, 1);
 
-      // Also respect alpha: semi-transparent edges should not produce full dots
-      // Use sqrt so edges stay present but don't "fill in" too hard
-      const alphaScale = Math.sqrt(avgAlpha);
+      // Radius scales with darkness AND alpha coverage
+      // sqrt(coverage) prevents edge cells from creating faint dots
+      const radius = clamp(half * (0.06 + 0.94 * darkness) * Math.sqrt(coverage), 0, half);
 
-      // Dot size:
-      // - baseline gives visible dots even in light areas
-      // - allow slight overlap (up to 1.15 * half) to reduce washed-out look
-      const minFrac = 0.08; // raises floor so output doesn't vanish
-      const maxFrac = 1.15; // allows overlap (darkens overall look)
-      let radius = half * (minFrac + (maxFrac - minFrac) * dark);
-      radius *= alphaScale;
-
-      // Skip near-invisible dots
       if (radius < 0.35) continue;
 
-      const cx = x0 + (x1 - x0) / 2;
-      const cy = y0 + (y1 - y0) / 2;
+      const cx = (col + 0.5) * cs;
+      const cy = (row + 0.5) * cs;
 
+      // Keep dot color; opacity comes from alpha coverage (not averaged alpha across transparent pixels)
       const fill = `rgb(${r},${g},${b})`;
-      const fillOpacity = avgAlpha.toFixed(4);
+      const fillOpacity = clamp(coverage, 0, 1).toFixed(4);
 
       if (dotShape === "square") {
         const size = radius * 2;
@@ -249,8 +213,8 @@ async function makeColorHalftonePng(inputBuffer, { cellSize, maxWidth, dotShape,
           )}" fill="${fill}" fill-opacity="${fillOpacity}" />`
         );
       } else if (dotShape === "ellipse") {
-        const rx = radius * 1.18;
-        const ry = radius * 0.86;
+        const rx = radius * 1.2;
+        const ry = radius * 0.85;
         shapes.push(
           `<ellipse cx="${cx.toFixed(2)}" cy="${cy.toFixed(2)}" rx="${rx.toFixed(
             2
@@ -263,20 +227,23 @@ async function makeColorHalftonePng(inputBuffer, { cellSize, maxWidth, dotShape,
           )}" fill="${fill}" fill-opacity="${fillOpacity}" />`
         );
       }
+
+      cellsUsed++;
     }
   }
 
+  // IMPORTANT: SVG must be same size as resized image so transparency matches expected output
   const svg = `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">
   <rect width="100%" height="100%" fill="transparent" />
-  ${shapes.join("")}
+  ${shapes.join("\n")}
 </svg>`;
 
   const out = await sharp(Buffer.from(svg))
     .png({ compressionLevel: 9, adaptiveFiltering: true })
     .toBuffer();
 
-  return { png: out, width: w, height: h, cellsUsed: shapes.length };
+  return { png: out, width: w, height: h, cellsUsed };
 }
 
 /** ---------------------------
@@ -338,12 +305,39 @@ app.post("/v1/halftone/upload-url", async (req, res) => {
   }
 });
 
+const DownloadUrlRequest = z.object({ key: z.string().min(1) });
+
+app.post("/v1/halftone/download-url", async (req, res) => {
+  try {
+    const parsed = DownloadUrlRequest.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json(
+        errJson("BAD_REQUEST", "Invalid request", {
+          issues: parsed.error.flatten(),
+        })
+      );
+    }
+
+    const cmd = new GetObjectCommand({
+      Bucket: process.env.R2_BUCKET,
+      Key: parsed.data.key,
+    });
+
+    const downloadUrl = await getSignedUrl(s3, cmd, { expiresIn: 600 });
+    return res.json({ downloadUrl });
+  } catch (e) {
+    console.error(`[${req._rid}] download-url error`, e);
+    return res.status(500).json(errJson("INTERNAL", "Failed to create download URL"));
+  }
+});
+
+// maxWidth up to 3600 for 12" @ 300dpi (your UI already suggests 3600)
 const ProcessRequest = z.object({
   key: z.string().min(1),
   cellSize: z.number().int().min(4).max(80).default(12),
-  maxWidth: z.number().int().min(256).max(MAX_WIDTH_PX).default(2000),
+  maxWidth: z.number().int().min(256).max(4000).default(2000),
   dotShape: z.enum(["circle", "square", "ellipse"]).default("circle"),
-  strength: z.number().int().min(0).max(260).default(120),
+  strength: z.number().int().min(0).max(300).default(100),
 });
 
 app.post("/v1/halftone/process", async (req, res) => {
@@ -358,14 +352,19 @@ app.post("/v1/halftone/process", async (req, res) => {
 
   const { key, cellSize, maxWidth, dotShape, strength } = parsed.data;
 
-  const started = Date.now();
-
   try {
+    const t0 = Date.now();
     logWithReq(req, "PROCESS PARAMS:", { key, cellSize, maxWidth, dotShape, strength });
 
-    // 1) HeadObject check
+    // 1) HeadObject (optional size guard)
     try {
-      const head = await s3.send(new HeadObjectCommand({ Bucket: process.env.R2_BUCKET, Key: key }));
+      const head = await s3.send(
+        new HeadObjectCommand({
+          Bucket: process.env.R2_BUCKET,
+          Key: key,
+        })
+      );
+
       if (typeof head.ContentLength === "number" && head.ContentLength > MAX_UPLOAD_BYTES) {
         return res
           .status(413)
@@ -375,20 +374,30 @@ app.post("/v1/halftone/process", async (req, res) => {
       logWithReq(req, "HeadObject warning:", String(e?.name || e));
     }
 
-    // 2) Download
-    const obj = await s3.send(new GetObjectCommand({ Bucket: process.env.R2_BUCKET, Key: key }));
-    if (!obj.Body) return res.status(404).json(errJson("NOT_FOUND", "Input object not found"));
+    // 2) Download object
+    const obj = await s3.send(
+      new GetObjectCommand({
+        Bucket: process.env.R2_BUCKET,
+        Key: key,
+      })
+    );
+
+    if (!obj.Body) {
+      return res.status(404).json(errJson("NOT_FOUND", "Input object not found"));
+    }
 
     const inputBuffer = await streamToBuffer(obj.Body);
 
-    if (inputBuffer.length <= 0) return res.status(400).json(errJson("BAD_IMAGE", "Uploaded file is empty"));
+    if (inputBuffer.length <= 0) {
+      return res.status(400).json(errJson("BAD_IMAGE", "Uploaded file is empty"));
+    }
     if (inputBuffer.length > MAX_UPLOAD_BYTES) {
       return res
         .status(413)
         .json(errJson("TOO_LARGE", `File exceeds max upload size (${MAX_UPLOAD_BYTES} bytes)`));
     }
 
-    // 3) Validate image
+    // 3) Validate readable image
     let meta;
     try {
       meta = await sharp(inputBuffer, { failOn: "none" }).metadata();
@@ -420,7 +429,7 @@ app.post("/v1/halftone/process", async (req, res) => {
       );
     }
 
-    // 4) Generate halftone (ALPHA-CORRECT)
+    // 4) Generate halftone
     const { png, width, height, cellsUsed } = await makeColorHalftonePng(inputBuffer, {
       cellSize,
       maxWidth,
@@ -444,11 +453,14 @@ app.post("/v1/halftone/process", async (req, res) => {
     // 6) Signed download URL
     const downloadUrl = await getSignedUrl(
       s3,
-      new GetObjectCommand({ Bucket: process.env.R2_BUCKET, Key: outputKey }),
+      new GetObjectCommand({
+        Bucket: process.env.R2_BUCKET,
+        Key: outputKey,
+      }),
       { expiresIn: 600 }
     );
 
-    const ms = Date.now() - started;
+    const ms = Date.now() - t0;
     logWithReq(req, "PROCESS OK:", { outputKey, width, height, ms, cellsUsed });
 
     return res.json({

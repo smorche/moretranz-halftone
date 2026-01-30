@@ -14,7 +14,17 @@
       button { cursor: pointer; }
       button[disabled] { cursor: not-allowed; opacity: 0.6; }
       .muted { color:#666; font-size: 12px; line-height: 1.35; }
-      img { max-width: 100%; border: 1px solid #eee; border-radius: 8px; background: linear-gradient(45deg, #eee 25%, transparent 25%), linear-gradient(-45deg, #eee 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #eee 75%), linear-gradient(-45deg, transparent 75%, #eee 75%); background-size: 20px 20px; background-position: 0 0, 0 10px, 10px -10px, -10px 0px; }
+      img {
+        max-width: 100%;
+        border: 1px solid #eee;
+        border-radius: 8px;
+        background: linear-gradient(45deg, #eee 25%, transparent 25%),
+                    linear-gradient(-45deg, #eee 25%, transparent 25%),
+                    linear-gradient(45deg, transparent 75%, #eee 75%),
+                    linear-gradient(-45deg, transparent 75%, #eee 75%);
+        background-size: 20px 20px;
+        background-position: 0 0, 0 10px, 10px -10px, -10px 0px;
+      }
       .ok { color: #0a7a0a; font-weight: 600; }
       .err { color: #b00020; white-space: pre-wrap; }
       .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; font-size: 12px; }
@@ -156,7 +166,7 @@
       }
 
       goBtn.addEventListener("click", async () => {
-        if (busy) return; // prevent overlapping runs
+        if (busy) return;
         const f = fileEl.files?.[0];
         if (!f) return setStatus("Please choose an image first.", "err");
 
@@ -176,7 +186,6 @@
         lastDownloadUrl = null;
 
         try {
-          // 1) get upload URL
           const upResp = await fetch(`${base}/v1/halftone/upload-url`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -194,7 +203,6 @@
 
           const up = await upResp.json();
 
-          // 2) PUT to R2
           const putResp = await fetch(up.uploadUrl, {
             method: "PUT",
             headers: up.headers || { "Content-Type": f.type },
@@ -206,7 +214,6 @@
             throw new Error(`R2 PUT failed (${putResp.status}): ${txt || "no body"}`);
           }
 
-          // 3) process
           const payload = {
             key: up.key,
             cellSize: Number(cellSize.value),
@@ -233,8 +240,10 @@
 
           lastDownloadUrl = proc.downloadUrl;
 
-          // bust cache to ensure you see the newest PNG
-          outPreview.src = proc.downloadUrl + (proc.downloadUrl.includes("?") ? "&" : "?") + "t=" + Date.now();
+          // IMPORTANT: do NOT append query params to a presigned URL (breaks signature).
+          // If you want a “refresh”, use a fragment (safe), or simply assign the URL as-is.
+          outPreview.src = proc.downloadUrl + "#t=" + Date.now();
+
           dlBtn.disabled = false;
 
           setStatus("Done ✅", "ok");
@@ -245,7 +254,6 @@
             `params: ${JSON.stringify(proc.params || payload)}`
           );
         } catch (err) {
-          // "Failed to fetch" usually means: CORS blocked, API restarting, DNS, or mixed-content.
           const msg = String(err?.message || err);
           if (msg.includes("Failed to fetch")) {
             setStatus(
@@ -265,6 +273,11 @@
       dlBtn.addEventListener("click", async () => {
         if (!lastDownloadUrl) return;
         const resp = await fetch(lastDownloadUrl);
+        if (!resp.ok) {
+          const t = await resp.text().catch(() => "");
+          setStatus(`Download failed (${resp.status}): ${t || "no body"}`, "err");
+          return;
+        }
         const blob = await resp.blob();
         const a = document.createElement("a");
         a.href = URL.createObjectURL(blob);

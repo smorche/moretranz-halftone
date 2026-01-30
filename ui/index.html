@@ -7,38 +7,37 @@
     <style>
       body { font-family: Arial, sans-serif; max-width: 920px; margin: 24px auto; padding: 0 16px; }
       .row { display: flex; gap: 16px; flex-wrap: wrap; align-items: flex-start; }
-      .card { border: 1px solid #ddd; border-radius: 12px; padding: 16px; background: #fff; }
+      .card { border: 1px solid #ddd; border-radius: 10px; padding: 16px; background: #fff; }
       label { display:block; font-size: 14px; margin: 12px 0 6px; font-weight: 600; }
       input[type="range"] { width: 100%; }
-      select, input[type="file"], input[type="text"], button { width: 100%; padding: 10px; font-size: 14px; box-sizing: border-box; }
+      select, input[type="file"], button, input[type="text"] { width: 100%; padding: 10px; font-size: 14px; }
       button { cursor: pointer; }
-      button:disabled { opacity: .6; cursor: not-allowed; }
+      button[disabled] { cursor: not-allowed; opacity: 0.6; }
       .muted { color:#666; font-size: 12px; line-height: 1.35; }
-      img { max-width: 100%; border: 1px solid #eee; border-radius: 10px; background: repeating-conic-gradient(#f6f6f6 0% 25%, #ffffff 0% 50%) 50% / 16px 16px; }
-      .ok { color: #0a7a0a; }
+      img { max-width: 100%; border: 1px solid #eee; border-radius: 8px; background: linear-gradient(45deg, #eee 25%, transparent 25%), linear-gradient(-45deg, #eee 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #eee 75%), linear-gradient(-45deg, transparent 75%, #eee 75%); background-size: 20px 20px; background-position: 0 0, 0 10px, 10px -10px, -10px 0px; }
+      .ok { color: #0a7a0a; font-weight: 600; }
       .err { color: #b00020; white-space: pre-wrap; }
       .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; font-size: 12px; }
-      .pill { display:inline-block; padding: 3px 8px; border: 1px solid #ddd; border-radius: 999px; font-size: 12px; color:#333; background:#fafafa; }
+      .pill { display:inline-block; font-size: 12px; padding: 4px 8px; border-radius: 999px; border: 1px solid #ddd; background: #fafafa; margin-left: 8px; }
       .btnRow { display:flex; gap:10px; }
-      .btnRow button { width: 100%; }
     </style>
   </head>
   <body>
-    <h1 style="margin-bottom:8px;">MoreTranz Halftone Tool</h1>
-    <p class="muted" style="margin-top:0;">
+    <h1>MoreTranz Halftone Tool</h1>
+    <p class="muted">
       Uploads to Cloudflare R2, processes on Render, returns a downloadable PNG.
       <span class="pill">Tip: 12&quot; @ 300dpi = 3600px</span>
     </p>
 
     <div class="row">
       <div class="card" style="flex: 1 1 360px;">
-        <h3 style="margin-top:0;">1) Choose image</h3>
+        <h3>1) Choose image</h3>
         <input id="file" type="file" accept="image/png,image/jpeg,image/webp" />
-        <div id="fileInfo" class="muted" style="margin-top:6px;"></div>
+        <div id="fileInfo" class="muted"></div>
 
-        <hr style="border:none;border-top:1px solid #eee;margin:16px 0;"/>
+        <hr style="margin: 16px 0; border: none; border-top: 1px solid #eee;" />
 
-        <h3 style="margin:0 0 8px;">2) Settings</h3>
+        <h3>2) Settings</h3>
 
         <label>Dot shape</label>
         <select id="dotShape">
@@ -48,21 +47,21 @@
         </select>
 
         <label>Cell size: <span id="cellSizeVal">12</span></label>
-        <input id="cellSize" type="range" min="8" max="30" step="1" value="12" />
+        <input id="cellSize" type="range" min="6" max="30" step="1" value="12" />
         <div class="muted">Smaller = more detail but more CPU/RAM.</div>
 
-        <label style="margin-top:14px;">Max width: <span id="maxWidthVal">2000</span> px</label>
-        <input id="maxWidth" type="range" min="500" max="3600" step="50" value="2000" />
+        <label style="margin-top:14px;">Max width: <span id="maxWidthVal">3600</span> px</label>
+        <input id="maxWidth" type="range" min="800" max="4000" step="50" value="3600" />
         <div class="muted">For 12&quot; @ 300dpi, use 3600. Reduce if performance is slow.</div>
 
         <label style="margin-top:14px;">Strength: <span id="strengthVal">120</span></label>
-        <input id="strength" type="range" min="0" max="200" step="5" value="120" />
+        <input id="strength" type="range" min="50" max="250" step="1" value="120" />
         <div class="muted">
-          100 = baseline. Higher = darker/more dot coverage. (Try 140–180 for richer color.)
+          100 = baseline. Higher = darker/more dot coverage (try 140–200 for richer color).
         </div>
 
         <label style="margin-top:14px;">API base URL</label>
-        <input id="apiBase" class="mono" value="https://moretranz-halftone.onrender.com" />
+        <input id="apiBase" class="mono" type="text" value="https://moretranz-halftone.onrender.com" />
 
         <div class="btnRow" style="margin-top:14px;">
           <button id="go">Generate Halftone</button>
@@ -74,7 +73,7 @@
       </div>
 
       <div class="card" style="flex: 1 1 420px;">
-        <h3 style="margin-top:0;">Preview</h3>
+        <h3>Preview</h3>
         <div class="muted">Original</div>
         <img id="origPreview" alt="" />
         <div style="height:10px;"></div>
@@ -100,38 +99,28 @@
 
       const cellSize = $("cellSize");
       const maxWidth = $("maxWidth");
-      const dotShape = $("dotShape");
       const strength = $("strength");
+      const dotShape = $("dotShape");
 
       const cellSizeVal = $("cellSizeVal");
       const maxWidthVal = $("maxWidthVal");
       const strengthVal = $("strengthVal");
-
-      const DEFAULTS = {
-        dotShape: "circle",
-        cellSize: 12,
-        maxWidth: 2000,
-        strength: 120,
-        apiBase: "https://moretranz-halftone.onrender.com"
-      };
 
       cellSize.addEventListener("input", () => (cellSizeVal.textContent = cellSize.value));
       maxWidth.addEventListener("input", () => (maxWidthVal.textContent = maxWidth.value));
       strength.addEventListener("input", () => (strengthVal.textContent = strength.value));
 
       let lastDownloadUrl = null;
+      let busy = false;
 
       resetBtn.addEventListener("click", () => {
-        dotShape.value = DEFAULTS.dotShape;
-        cellSize.value = DEFAULTS.cellSize;
-        maxWidth.value = DEFAULTS.maxWidth;
-        strength.value = DEFAULTS.strength;
-        apiBase.value = DEFAULTS.apiBase;
-
-        cellSizeVal.textContent = DEFAULTS.cellSize;
-        maxWidthVal.textContent = DEFAULTS.maxWidth;
-        strengthVal.textContent = DEFAULTS.strength;
-
+        dotShape.value = "circle";
+        cellSize.value = 12;
+        maxWidth.value = 3600;
+        strength.value = 120;
+        cellSizeVal.textContent = "12";
+        maxWidthVal.textContent = "3600";
+        strengthVal.textContent = "120";
         setStatus("");
         setDebug("");
       });
@@ -139,14 +128,11 @@
       fileEl.addEventListener("change", () => {
         const f = fileEl.files?.[0];
         if (!f) return;
-
         fileInfo.textContent = `${f.name} — ${f.type || "unknown"} — ${f.size.toLocaleString()} bytes`;
         origPreview.src = URL.createObjectURL(f);
-
         outPreview.removeAttribute("src");
         dlBtn.disabled = true;
         lastDownloadUrl = null;
-
         setStatus("");
         setDebug("");
       });
@@ -155,65 +141,43 @@
         statusEl.className = kind === "err" ? "err" : (kind === "ok" ? "ok" : "");
         statusEl.textContent = msg;
       }
-
       function setDebug(msg) {
         debugEl.textContent = msg;
       }
 
-      async function jsonOrText(resp) {
+      async function readBody(resp) {
         const ct = resp.headers.get("content-type") || "";
-        if (ct.includes("application/json")) return resp.json();
-        return resp.text();
+        if (ct.includes("application/json")) return await resp.json();
+        return await resp.text();
       }
 
-      function normalizeBaseUrl(raw) {
-        return String(raw || "").trim().replace(/\/+$/, "");
-      }
-
-      function friendlyNetworkError(err) {
-        const m = String(err?.message || err || "");
-        if (m.includes("Failed to fetch")) {
-          return [
-            "Failed to fetch",
-            "",
-            "This usually means the API was temporarily unavailable (restart) or your browser blocked the request.",
-            "Try again in 5–10 seconds.",
-          ].join("\n");
-        }
-        return m;
-      }
-
-      async function fetchWithRetry(url, opts, { tries = 2, delayMs = 700 } = {}) {
-        let lastErr;
-        for (let i = 0; i < tries; i++) {
-          try {
-            return await fetch(url, opts);
-          } catch (e) {
-            lastErr = e;
-            if (i < tries - 1) await new Promise(r => setTimeout(r, delayMs));
-          }
-        }
-        throw lastErr;
+      function cleanBaseUrl(s) {
+        return (s || "").trim().replace(/\/+$/, "");
       }
 
       goBtn.addEventListener("click", async () => {
+        if (busy) return; // prevent overlapping runs
         const f = fileEl.files?.[0];
         if (!f) return setStatus("Please choose an image first.", "err");
 
         const allowed = ["image/png", "image/jpeg", "image/webp"];
         if (!allowed.includes(f.type)) return setStatus(`Unsupported type: ${f.type}`, "err");
 
-        const base = normalizeBaseUrl(apiBase.value);
-        if (!base.startsWith("http")) return setStatus("API base URL must start with http/https.", "err");
+        const base = cleanBaseUrl(apiBase.value);
+        if (!base) return setStatus("API base URL is empty.", "err");
 
-        setStatus("Working…");
-        setDebug("");
+        busy = true;
         goBtn.disabled = true;
         resetBtn.disabled = true;
         dlBtn.disabled = true;
 
+        setStatus("Working…");
+        setDebug("");
+        lastDownloadUrl = null;
+
         try {
-          const upResp = await fetchWithRetry(`${base}/v1/halftone/upload-url`, {
+          // 1) get upload URL
+          const upResp = await fetch(`${base}/v1/halftone/upload-url`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -221,65 +185,78 @@
               contentType: f.type,
               contentLength: f.size
             })
-          }, { tries: 2, delayMs: 500 });
+          });
 
           if (!upResp.ok) {
-            const body = await jsonOrText(upResp);
-            throw new Error(`upload-url failed (${upResp.status}): ${JSON.stringify(body, null, 2)}`);
+            const body = await readBody(upResp);
+            throw new Error(`upload-url failed (${upResp.status}): ${typeof body === "string" ? body : JSON.stringify(body, null, 2)}`);
           }
 
           const up = await upResp.json();
 
-          const putResp = await fetchWithRetry(up.uploadUrl, {
+          // 2) PUT to R2
+          const putResp = await fetch(up.uploadUrl, {
             method: "PUT",
             headers: up.headers || { "Content-Type": f.type },
             body: f
-          }, { tries: 2, delayMs: 500 });
+          });
 
           if (!putResp.ok) {
             const txt = await putResp.text().catch(() => "");
             throw new Error(`R2 PUT failed (${putResp.status}): ${txt || "no body"}`);
           }
 
-          const procResp = await fetchWithRetry(`${base}/v1/halftone/process`, {
+          // 3) process
+          const payload = {
+            key: up.key,
+            cellSize: Number(cellSize.value),
+            maxWidth: Number(maxWidth.value),
+            dotShape: dotShape.value,
+            strength: Number(strength.value)
+          };
+
+          const procResp = await fetch(`${base}/v1/halftone/process`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              key: up.key,
-              cellSize: Number(cellSize.value),
-              maxWidth: Number(maxWidth.value),
-              dotShape: dotShape.value,
-              strength: Number(strength.value)
-            })
-          }, { tries: 2, delayMs: 900 });
+            body: JSON.stringify(payload)
+          });
 
           if (!procResp.ok) {
-            const body = await jsonOrText(procResp);
-
-            if (procResp.status === 429) {
-              throw new Error("Processor busy (429). Wait ~5 seconds and click Generate again.\n\n" + JSON.stringify(body, null, 2));
-            }
-
-            throw new Error(`process failed (${procResp.status}): ${JSON.stringify(body, null, 2)}`);
+            const body = await readBody(procResp);
+            throw new Error(`process failed (${procResp.status}): ${typeof body === "string" ? body : JSON.stringify(body, null, 2)}`);
           }
 
           const proc = await procResp.json();
-
           if (!proc.downloadUrl) {
             throw new Error(`process response missing downloadUrl: ${JSON.stringify(proc, null, 2)}`);
           }
 
           lastDownloadUrl = proc.downloadUrl;
-          outPreview.src = proc.downloadUrl;
+
+          // bust cache to ensure you see the newest PNG
+          outPreview.src = proc.downloadUrl + (proc.downloadUrl.includes("?") ? "&" : "?") + "t=" + Date.now();
           dlBtn.disabled = false;
 
           setStatus("Done ✅", "ok");
-
-          const perf = proc.perf ? `\nms: ${proc.perf.ms}\ncells: ${proc.perf.cellCount}\nout: ${proc.perf.outWidth}x${proc.perf.outHeight}` : "";
-          setDebug(`uploadKey: ${up.key}\noutputKey: ${proc.outputKey || "(not provided)"}${perf}`);
+          setDebug(
+            `uploadKey: ${up.key}\n` +
+            `outputKey: ${proc.outputKey || "(not provided)"}\n` +
+            `ms: ${proc.ms ?? "(n/a)"}\n` +
+            `params: ${JSON.stringify(proc.params || payload)}`
+          );
         } catch (err) {
-          setStatus(friendlyNetworkError(err), "err");
+          // "Failed to fetch" usually means: CORS blocked, API restarting, DNS, or mixed-content.
+          const msg = String(err?.message || err);
+          if (msg.includes("Failed to fetch")) {
+            setStatus(
+              "Failed to fetch\n\nThis usually means the API was temporarily unavailable (restart) or your browser blocked the request.\nTry again in 5–10 seconds.",
+              "err"
+            );
+          } else {
+            setStatus(msg, "err");
+          }
         } finally {
+          busy = false;
           goBtn.disabled = false;
           resetBtn.disabled = false;
         }
@@ -287,20 +264,14 @@
 
       dlBtn.addEventListener("click", async () => {
         if (!lastDownloadUrl) return;
-
-        try {
-          const resp = await fetchWithRetry(lastDownloadUrl, {}, { tries: 2, delayMs: 500 });
-          const blob = await resp.blob();
-
-          const a = document.createElement("a");
-          a.href = URL.createObjectURL(blob);
-          a.download = "halftone.png";
-          document.body.appendChild(a);
-          a.click();
-          a.remove();
-        } catch (err) {
-          setStatus(friendlyNetworkError(err), "err");
-        }
+        const resp = await fetch(lastDownloadUrl);
+        const blob = await resp.blob();
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = "halftone.png";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
       });
     </script>
   </body>

@@ -326,7 +326,6 @@ app.use((req, _res, next) => {
  *  --------------------------*/
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
-// Keep the v1 routes your frontend calls.
 const UploadUrlRequest = z.object({
   filename: z.string().min(1),
   contentType: z.enum(["image/png", "image/jpeg", "image/webp"]),
@@ -375,7 +374,6 @@ const ProcessRequest = z.object({
   cellSize: z.number().int().min(4).max(80).default(12),
   maxWidth: z.number().int().min(256).max(MAX_MAX_WIDTH).default(DEFAULT_MAX_WIDTH),
   dotShape: z.enum(["circle", "square", "ellipse"]).default("circle"),
-  // Strength: 100 baseline; allow stronger darkening
   strength: z.number().int().min(50).max(250).default(120)
 });
 
@@ -387,7 +385,10 @@ app.post("/v1/halftone/process", async (req, res) => {
     );
   }
 
-  const { key, cellSize, maxWidth, dotShape, strength } = parsed.data;
+  // STRONGLY RECOMMENDED: snap strength to nearest 10 (matches UI step=10)
+  let { key, cellSize, maxWidth, dotShape, strength } = parsed.data;
+  strength = Math.round(strength / 10) * 10;
+  strength = clamp(strength, 50, 250);
 
   try {
     logWithReq(req, "PROCESS PARAMS:", { key, cellSize, maxWidth, dotShape, strength });

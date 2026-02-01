@@ -13,7 +13,6 @@
         background: #fff;
       }
 
-      /* Stable two-column layout */
       .grid {
         display: grid;
         grid-template-columns: minmax(320px, 360px) minmax(340px, 1fr);
@@ -22,9 +21,7 @@
       }
 
       @media (max-width: 760px) {
-        .grid {
-          grid-template-columns: 1fr;
-        }
+        .grid { grid-template-columns: 1fr; }
       }
 
       .card {
@@ -45,7 +42,6 @@
       .err { color: #b00020; white-space: pre-wrap; }
       .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; font-size: 12px; }
 
-      /* Keep images from blowing up layout */
       .imgWrap { width: 100%; }
       img {
         display: block;
@@ -55,7 +51,6 @@
         border: 1px solid #eee;
         border-radius: 8px;
 
-        /* checkerboard background to visualize transparency */
         background:
           linear-gradient(45deg, #eee 25%, transparent 25%),
           linear-gradient(-45deg, #eee 25%, transparent 25%),
@@ -119,7 +114,8 @@
         <div class="muted">For 12&quot; @ 300dpi, use 3600. Reduce if performance is slow.</div>
 
         <label style="margin-top:14px;">Strength: <span id="strengthVal">120</span></label>
-        <input id="strength" type="range" min="50" max="250" step="1" value="120" />
+        <!-- REQUIRED CHANGE: step is now 10 -->
+        <input id="strength" type="range" min="50" max="250" step="10" value="120" />
         <div class="muted">
           100 = baseline. Higher = darker/more dot coverage (try 140–200 for richer color).
         </div>
@@ -259,7 +255,6 @@
         setDebug("");
 
         try {
-          // 1) get upload URL
           const upResp = await fetch(`${base}/v1/halftone/upload-url`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -277,7 +272,6 @@
 
           const up = await upResp.json();
 
-          // 2) PUT to R2
           const putResp = await fetch(up.uploadUrl, {
             method: "PUT",
             headers: up.headers || { "Content-Type": f.type },
@@ -289,7 +283,6 @@
             throw new Error(`R2 PUT failed (${putResp.status}): ${txt || "no body"}`);
           }
 
-          // 3) process
           const payload = {
             key: up.key,
             cellSize: Number(cellSize.value),
@@ -317,10 +310,8 @@
 
           lastDownloadUrl = proc.downloadUrl;
 
-          // IMPORTANT: use the exact presigned URL, unmodified
           outPreview.src = proc.downloadUrl;
 
-          // Provide a direct link to verify the file exists
           openLink.href = proc.downloadUrl;
           openLink.style.display = "inline-block";
 

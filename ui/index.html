@@ -71,6 +71,7 @@
         border: 1px solid #ddd;
         background: #fafafa;
         margin-left: 8px;
+        vertical-align: middle;
       }
 
       a.linkBtn {
@@ -113,11 +114,13 @@
         <input id="maxWidth" type="range" min="800" max="4000" step="50" value="3600" />
         <div class="muted">For 12&quot; @ 300dpi, use 3600. Reduce if performance is slow.</div>
 
-        <label style="margin-top:14px;">Strength: <span id="strengthVal">120</span></label>
-        <!-- REQUIRED CHANGE: step is now 10 -->
+        <label style="margin-top:14px;">
+          Strength: <span id="strengthVal">120</span>
+          <span id="strengthLabel" class="pill" style="display:none;"></span>
+        </label>
         <input id="strength" type="range" min="50" max="250" step="10" value="120" />
         <div class="muted">
-          100 = baseline. Higher = darker/more dot coverage (try 140–200 for richer color).
+          100 = baseline. Higher = darker/more dot coverage (try 150–250 for DTF-style richness).
         </div>
 
         <label style="margin-top:14px;">API base URL</label>
@@ -175,10 +178,34 @@
       const cellSizeVal = $("cellSizeVal");
       const maxWidthVal = $("maxWidthVal");
       const strengthVal = $("strengthVal");
+      const strengthLabel = $("strengthLabel");
 
       cellSize.addEventListener("input", () => (cellSizeVal.textContent = cellSize.value));
       maxWidth.addEventListener("input", () => (maxWidthVal.textContent = maxWidth.value));
-      strength.addEventListener("input", () => (strengthVal.textContent = strength.value));
+
+      function updateStrengthUI() {
+        const v = Number(strength.value);
+        strengthVal.textContent = String(v);
+
+        // Exact labels only. No ranges. No approximations.
+        const map = {
+          100: "Light",
+          150: "Normal",
+          200: "Bold",
+          250: "Extra Bold"
+        };
+
+        const label = map[v];
+        if (label) {
+          strengthLabel.textContent = label;
+          strengthLabel.style.display = "inline-block";
+        } else {
+          strengthLabel.textContent = "";
+          strengthLabel.style.display = "none";
+        }
+      }
+
+      strength.addEventListener("input", updateStrengthUI);
 
       let lastDownloadUrl = null;
       let busy = false;
@@ -188,9 +215,11 @@
         cellSize.value = 12;
         maxWidth.value = 3600;
         strength.value = 120;
+
         cellSizeVal.textContent = "12";
         maxWidthVal.textContent = "3600";
-        strengthVal.textContent = "120";
+
+        updateStrengthUI();
         setStatus("");
         setDebug("");
       });
@@ -267,7 +296,9 @@
 
           if (!upResp.ok) {
             const body = await readBody(upResp);
-            throw new Error(`upload-url failed (${upResp.status}): ${typeof body === "string" ? body : JSON.stringify(body, null, 2)}`);
+            throw new Error(
+              `upload-url failed (${upResp.status}): ${typeof body === "string" ? body : JSON.stringify(body, null, 2)}`
+            );
           }
 
           const up = await upResp.json();
@@ -299,7 +330,9 @@
 
           if (!procResp.ok) {
             const body = await readBody(procResp);
-            throw new Error(`process failed (${procResp.status}): ${typeof body === "string" ? body : JSON.stringify(body, null, 2)}`);
+            throw new Error(
+              `process failed (${procResp.status}): ${typeof body === "string" ? body : JSON.stringify(body, null, 2)}`
+            );
           }
 
           const proc = await procResp.json();
@@ -309,7 +342,6 @@
           }
 
           lastDownloadUrl = proc.downloadUrl;
-
           outPreview.src = proc.downloadUrl;
 
           openLink.href = proc.downloadUrl;
@@ -351,6 +383,9 @@
         a.click();
         a.remove();
       });
+
+      // initialize label on first load
+      updateStrengthUI();
     </script>
   </body>
 </html>

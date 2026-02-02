@@ -74,6 +74,9 @@
         vertical-align: middle;
       }
 
+      .tipRow { display:flex; flex-wrap:wrap; gap:8px; margin: 8px 0 16px; }
+      .tipRow .pill { margin-left: 0; }
+
       a.linkBtn {
         display: inline-block;
         margin-top: 10px;
@@ -86,10 +89,12 @@
   </head>
   <body>
     <h1>MoreTranz Halftone Tool</h1>
-    <p class="muted">
-      Uploads to Cloudflare R2, processes on Render, returns a downloadable PNG.
+
+    <div class="tipRow">
       <span class="pill">Tip: 12&quot; @ 300dpi = 3600px</span>
-    </p>
+      <span class="pill">Tip: Cell size 8–12 is best for most logos</span>
+      <span class="pill">Tip: Higher Strength = darker output</span>
+    </div>
 
     <div class="grid">
       <div class="card">
@@ -106,8 +111,8 @@
           <option value="square">square</option>
         </select>
 
-        <label>Cell size: <span id="cellSizeVal">12</span></label>
-        <input id="cellSize" type="range" min="6" max="30" step="1" value="12" />
+        <label>Cell size: <span id="cellSizeVal">10</span></label>
+        <input id="cellSize" type="range" min="6" max="30" step="1" value="10" />
         <div class="muted">Smaller = more detail but more CPU/RAM.</div>
 
         <label style="margin-top:14px;">Max width: <span id="maxWidthVal">3600</span> px</label>
@@ -115,16 +120,19 @@
         <div class="muted">For 12&quot; @ 300dpi, use 3600. Reduce if performance is slow.</div>
 
         <label style="margin-top:14px;">
-          Strength: <span id="strengthVal">120</span>
-          <span id="strengthLabel" class="pill" style="display:none;"></span>
+          Strength: <span id="strengthVal">150</span>
+          <span id="strengthLabel" class="pill">Normal</span>
         </label>
-        <input id="strength" type="range" min="50" max="250" step="10" value="120" />
+
+        <!-- Slider shows continuous range, but JS snaps to labeled values only -->
+        <input id="strength" type="range" min="100" max="250" step="1" value="150" />
         <div class="muted">
-          100 = baseline. Higher = darker/more dot coverage (try 150–250 for DTF-style richness).
+          Labels (exact):
+          Light = 100 · Normal = 150 · Bold = 200 · Extra Bold = 250
         </div>
 
-        <label style="margin-top:14px;">API base URL</label>
-        <input id="apiBase" class="mono" type="text" value="https://moretranz-halftone.onrender.com" />
+        <!-- Hidden from customers, still used by app -->
+        <input id="apiBase" type="hidden" value="https://moretranz-halftone.onrender.com" />
 
         <div class="btnRow" style="margin-top:14px;">
           <button id="go">Generate Halftone</button>
@@ -132,7 +140,6 @@
         </div>
 
         <div id="status" style="margin-top:12px;"></div>
-        <div id="debug" class="mono muted" style="margin-top:10px;"></div>
       </div>
 
       <div class="card">
@@ -163,7 +170,6 @@
       const origPreview = $("origPreview");
       const outPreview = $("outPreview");
       const statusEl = $("status");
-      const debugEl = $("debug");
       const goBtn = $("go");
       const resetBtn = $("reset");
       const dlBtn = $("download");
@@ -180,48 +186,53 @@
       const strengthVal = $("strengthVal");
       const strengthLabel = $("strengthLabel");
 
+      const STRENGTH_STOPS = [100, 150, 200, 250];
+      const STRENGTH_LABELS = {
+        100: "Light",
+        150: "Normal",
+        200: "Bold",
+        250: "Extra Bold"
+      };
+
+      function nearestStop(v) {
+        let best = STRENGTH_STOPS[0];
+        let bestD = Math.abs(v - best);
+        for (const s of STRENGTH_STOPS) {
+          const d = Math.abs(v - s);
+          if (d < bestD) { best = s; bestD = d; }
+        }
+        return best;
+      }
+
+      function setStrengthStop(v) {
+        const stop = nearestStop(Number(v));
+        strength.value = String(stop);
+        strengthVal.textContent = String(stop);
+        strengthLabel.textContent = STRENGTH_LABELS[stop] || "";
+      }
+
       cellSize.addEventListener("input", () => (cellSizeVal.textContent = cellSize.value));
       maxWidth.addEventListener("input", () => (maxWidthVal.textContent = maxWidth.value));
 
-      function updateStrengthUI() {
-        const v = Number(strength.value);
-        strengthVal.textContent = String(v);
-
-        // Exact labels only. No ranges. No approximations.
-        const map = {
-          100: "Light",
-          150: "Normal",
-          200: "Bold",
-          250: "Extra Bold"
-        };
-
-        const label = map[v];
-        if (label) {
-          strengthLabel.textContent = label;
-          strengthLabel.style.display = "inline-block";
-        } else {
-          strengthLabel.textContent = "";
-          strengthLabel.style.display = "none";
-        }
-      }
-
-      strength.addEventListener("input", updateStrengthUI);
+      // Snap strength to labeled stops only (no passing through each 10)
+      strength.addEventListener("input", () => setStrengthStop(strength.value));
+      // Also snap on release to guarantee it stays on a stop
+      strength.addEventListener("change", () => setStrengthStop(strength.value));
 
       let lastDownloadUrl = null;
       let busy = false;
 
       resetBtn.addEventListener("click", () => {
         dotShape.value = "circle";
-        cellSize.value = 12;
+        cellSize.value = 10;
         maxWidth.value = 3600;
-        strength.value = 120;
-
-        cellSizeVal.textContent = "12";
+        cellSizeVal.textContent = "10";
         maxWidthVal.textContent = "3600";
 
-        updateStrengthUI();
+        // Default Strength = 150 (Normal)
+        setStrengthStop(150);
+
         setStatus("");
-        setDebug("");
       });
 
       fileEl.addEventListener("change", () => {
@@ -238,16 +249,11 @@
         lastDownloadUrl = null;
 
         setStatus("");
-        setDebug("");
       });
 
       function setStatus(msg, kind = "") {
         statusEl.className = kind === "err" ? "err" : (kind === "ok" ? "ok" : "");
         statusEl.textContent = msg;
-      }
-
-      function setDebug(msg) {
-        debugEl.textContent = msg;
       }
 
       async function readBody(resp) {
@@ -270,7 +276,7 @@
         if (!allowed.includes(f.type)) return setStatus(`Unsupported type: ${f.type}`, "err");
 
         const base = cleanBaseUrl(apiBase.value);
-        if (!base) return setStatus("API base URL is empty.", "err");
+        if (!base) return setStatus("Service is not configured (missing API base).", "err");
 
         busy = true;
         goBtn.disabled = true;
@@ -281,7 +287,6 @@
         lastDownloadUrl = null;
 
         setStatus("Working…");
-        setDebug("");
 
         try {
           const upResp = await fetch(`${base}/v1/halftone/upload-url`, {
@@ -297,7 +302,7 @@
           if (!upResp.ok) {
             const body = await readBody(upResp);
             throw new Error(
-              `upload-url failed (${upResp.status}): ${typeof body === "string" ? body : JSON.stringify(body, null, 2)}`
+              `Upload failed (${upResp.status}): ${typeof body === "string" ? body : JSON.stringify(body, null, 2)}`
             );
           }
 
@@ -311,7 +316,7 @@
 
           if (!putResp.ok) {
             const txt = await putResp.text().catch(() => "");
-            throw new Error(`R2 PUT failed (${putResp.status}): ${txt || "no body"}`);
+            throw new Error(`Upload failed (${putResp.status}): ${txt || "no body"}`);
           }
 
           const payload = {
@@ -331,14 +336,13 @@
           if (!procResp.ok) {
             const body = await readBody(procResp);
             throw new Error(
-              `process failed (${procResp.status}): ${typeof body === "string" ? body : JSON.stringify(body, null, 2)}`
+              `Processing failed (${procResp.status}): ${typeof body === "string" ? body : JSON.stringify(body, null, 2)}`
             );
           }
 
           const proc = await procResp.json();
-
           if (!proc.downloadUrl) {
-            throw new Error(`process response missing downloadUrl: ${JSON.stringify(proc, null, 2)}`);
+            throw new Error("Processing completed but no output was returned.");
           }
 
           lastDownloadUrl = proc.downloadUrl;
@@ -348,14 +352,7 @@
           openLink.style.display = "inline-block";
 
           dlBtn.disabled = false;
-
           setStatus("Done ✅", "ok");
-          setDebug(
-            `uploadKey: ${up.key}\n` +
-            `outputKey: ${proc.outputKey || "(not provided)"}\n` +
-            `downloadUrl: ${proc.downloadUrl}\n` +
-            `ms: ${proc.ms ?? "(n/a)"}`
-          );
         } catch (err) {
           setStatus(String(err?.message || err), "err");
         } finally {
@@ -384,8 +381,10 @@
         a.remove();
       });
 
-      // initialize label on first load
-      updateStrengthUI();
+      // Initialize defaults on first load
+      cellSizeVal.textContent = cellSize.value;
+      maxWidthVal.textContent = maxWidth.value;
+      setStrengthStop(strength.value);
     </script>
   </body>
 </html>

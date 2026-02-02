@@ -120,7 +120,6 @@ function uid() {
  * - strength < 100 => lighter
  *
  * coverage = 1 - (1 - darkness)^s, where s=strength/100
- * This is a good “ink/coverage” style curve.
  */
 function coverageFromDarkness(darkness01, strength) {
   const s = clamp(strength / 100, 0.25, 3.0); // allow 25..300 mapped
@@ -132,11 +131,6 @@ function coverageFromDarkness(darkness01, strength) {
  * - reads RGBA
  * - averages per cell using alpha-weighted color
  * - draws dots directly into output RGBA buffer
- *
- * Benefits vs SVG:
- * - stable memory usage
- * - correct alpha blending
- * - better perceived color (no SVG rasterization quirks)
  */
 async function makeColorHalftonePng(inputBuffer, { cellSize, maxWidth, dotShape, strength }) {
   const base = sharp(inputBuffer, { failOn: "none" });
@@ -157,7 +151,6 @@ async function makeColorHalftonePng(inputBuffer, { cellSize, maxWidth, dotShape,
   const h = rMeta.height;
   if (!w || !h) throw new Error("Could not read resized dimensions");
 
-  // Pull raw RGBA
   const { data } = await resized.ensureAlpha().raw().toBuffer({ resolveWithObject: true });
 
   const cs = clamp(Math.floor(cellSize), 4, 80);
@@ -166,10 +159,8 @@ async function makeColorHalftonePng(inputBuffer, { cellSize, maxWidth, dotShape,
   const cols = Math.ceil(w / cs);
   const rows = Math.ceil(h / cs);
 
-  // output RGBA initialized transparent
   const out = Buffer.alloc(w * h * 4, 0);
 
-  // Dot drawing helper with alpha blending (SRC over)
   function blendPixel(pxIdx, r, g, b, a01) {
     if (a01 <= 0) return;
 
@@ -201,9 +192,8 @@ async function makeColorHalftonePng(inputBuffer, { cellSize, maxWidth, dotShape,
       const x0 = col * cs;
       const x1 = Math.min(x0 + cs, w);
 
-      // alpha-weighted average color
       let rSum = 0, gSum = 0, bSum = 0;
-      let aSum = 0; // 0..(count*255)
+      let aSum = 0;
       let count = 0;
 
       for (let y = y0; y < y1; y++) {
@@ -211,7 +201,6 @@ async function makeColorHalftonePng(inputBuffer, { cellSize, maxWidth, dotShape,
           const idx = (y * w + x) * 4;
           const a = data[idx + 3];
           if (a > 0) {
-            // weight RGB by alpha to avoid transparent edges washing color
             rSum += data[idx] * a;
             gSum += data[idx + 1] * a;
             bSum += data[idx + 2] * a;
@@ -221,31 +210,26 @@ async function makeColorHalftonePng(inputBuffer, { cellSize, maxWidth, dotShape,
         }
       }
 
-      if (aSum <= 0) continue; // fully transparent cell
+      if (aSum <= 0) continue;
 
-      // Un-premultiply averages
       const r = Math.round(rSum / aSum);
       const g = Math.round(gSum / aSum);
       const b = Math.round(bSum / aSum);
 
-      // Average alpha across the whole cell area (so soft edges stay soft)
-      const aAvg = aSum / count; // 0..255
+      const aAvg = aSum / count;
       const a01 = clamp(aAvg / 255, 0, 1);
 
-      // Dot size from luminance -> darkness -> coverage curve
-      const lum = luminance255(r, g, b); // 0..255
-      const darkness = 1 - lum / 255; // 0..1
-      const coverage = coverageFromDarkness(darkness, strength); // 0..1
+      const lum = luminance255(r, g, b);
+      const darkness = 1 - lum / 255;
+      const coverage = coverageFromDarkness(darkness, strength);
 
-      // Important: allow some minimum dot presence when strength is high,
-      // but do NOT flood highlights.
       const s = clamp(strength / 100, 0.25, 3.0);
-      const minFrac = clamp(0.03 * (s - 1), 0, 0.10); // up to 10% of half
+      const minFrac = clamp(0.03 * (s - 1), 0, 0.10);
       const frac = clamp(minFrac + coverage * (1 - minFrac), 0, 1);
 
-      // radii by shape
       let rx = half * frac;
       let ry = half * frac;
+
       if (dotShape === "ellipse") {
         rx = rx * 1.25;
         ry = ry * 0.85;
@@ -253,24 +237,17 @@ async function makeColorHalftonePng(inputBuffer, { cellSize, maxWidth, dotShape,
         ry = clamp(ry, 0, half * 1.2);
       }
 
-      // Skip super tiny dots
       if (rx < 0.35 || ry < 0.35) continue;
 
       const cx = x0 + (x1 - x0) / 2;
       const cy = y0 + (y1 - y0) / 2;
 
-      let minX = Math.floor(cx - rx);
-      let maxX = Math.ceil(cx + rx);
-      let minY = Math.floor(cy - ry);
-      let maxY = Math.ceil(cy + ry);
-
-      minX = clamp(minX, 0, w - 1);
-      maxX = clamp(maxX, 0, w - 1);
-      minY = clamp(minY, 0, h - 1);
-      maxY = clamp(maxY, 0, h - 1);
+      let minX = clamp(Math.floor(cx - rx), 0, w - 1);
+      let maxX = clamp(Math.ceil(cx + rx), 0, w - 1);
+      let minY = clamp(Math.floor(cy - ry), 0, h - 1);
+      let maxY = clamp(Math.ceil(cy + ry), 0, h - 1);
 
       if (dotShape === "square") {
-        // square uses rx as half-size
         const halfSize = rx;
         minX = clamp(Math.floor(cx - halfSize), 0, w - 1);
         maxX = clamp(Math.ceil(cx + halfSize), 0, w - 1);
@@ -284,7 +261,6 @@ async function makeColorHalftonePng(inputBuffer, { cellSize, maxWidth, dotShape,
           }
         }
       } else {
-        // circle/ellipse check
         const invRx2 = 1 / (rx * rx);
         const invRy2 = 1 / (ry * ry);
 
@@ -305,7 +281,6 @@ async function makeColorHalftonePng(inputBuffer, { cellSize, maxWidth, dotShape,
     }
   }
 
-  // Encode as PNG
   const png = await sharp(out, { raw: { width: w, height: h, channels: 4 } })
     .png({ compressionLevel: 9, adaptiveFiltering: true })
     .toBuffer();
@@ -371,10 +346,13 @@ app.post("/v1/halftone/upload-url", async (req, res) => {
 
 const ProcessRequest = z.object({
   key: z.string().min(1),
-  cellSize: z.number().int().min(4).max(80).default(12),
+  cellSize: z.number().int().min(4).max(80).default(10),
   maxWidth: z.number().int().min(256).max(MAX_MAX_WIDTH).default(DEFAULT_MAX_WIDTH),
   dotShape: z.enum(["circle", "square", "ellipse"]).default("circle"),
-  strength: z.number().int().min(50).max(250).default(120)
+  // Only the DTF-aligned label values
+  strength: z.number().int().refine((v) => [100, 150, 200, 250].includes(v), {
+    message: "Strength must be one of: 100, 150, 200, 250"
+  }).default(150)
 });
 
 app.post("/v1/halftone/process", async (req, res) => {
@@ -385,15 +363,11 @@ app.post("/v1/halftone/process", async (req, res) => {
     );
   }
 
-  // STRONGLY RECOMMENDED: snap strength to nearest 10 (matches UI step=10)
-  let { key, cellSize, maxWidth, dotShape, strength } = parsed.data;
-  strength = Math.round(strength / 10) * 10;
-  strength = clamp(strength, 50, 250);
+  const { key, cellSize, maxWidth, dotShape, strength } = parsed.data;
 
   try {
     logWithReq(req, "PROCESS PARAMS:", { key, cellSize, maxWidth, dotShape, strength });
 
-    // Head check if available
     try {
       const head = await s3.send(
         new HeadObjectCommand({ Bucket: process.env.R2_BUCKET, Key: key })
@@ -424,7 +398,6 @@ app.post("/v1/halftone/process", async (req, res) => {
         .json(errJson("TOO_LARGE", `File exceeds max upload size (${MAX_UPLOAD_BYTES} bytes)`));
     }
 
-    // Validate image readable
     let meta;
     try {
       meta = await sharp(inputBuffer, { failOn: "none" }).metadata();
@@ -477,11 +450,15 @@ app.post("/v1/halftone/process", async (req, res) => {
       })
     );
 
-    const downloadUrl = await getSignedUrl(
-      s3,
-      new GetObjectCommand({ Bucket: process.env.R2_BUCKET, Key: outputKey }),
-      { expiresIn: 600 }
-    );
+    // Force a real download (best UX) via response headers on signed URL:
+    const downloadCmd = new GetObjectCommand({
+      Bucket: process.env.R2_BUCKET,
+      Key: outputKey,
+      ResponseContentType: "image/png",
+      ResponseContentDisposition: `attachment; filename="halftone.png"`
+    });
+
+    const downloadUrl = await getSignedUrl(s3, downloadCmd, { expiresIn: 600 });
 
     const ms = Date.now() - t0;
 

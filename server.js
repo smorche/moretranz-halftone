@@ -39,6 +39,9 @@ const MAX_IMAGE_PIXELS = Number(process.env.MAX_IMAGE_PIXELS || 60_000_000); // 
 const DEFAULT_MAX_WIDTH = Number(process.env.DEFAULT_MAX_WIDTH || 3600);
 const MAX_MAX_WIDTH = Number(process.env.MAX_MAX_WIDTH || 4000);
 
+// REQUIRED: force output DPI
+const OUTPUT_DPI = Number(process.env.OUTPUT_DPI || 300);
+
 const ALLOWED_ORIGINS = new Set([
   "https://moretranz-halftone.pages.dev",
   "https://moretranz.com",
@@ -51,7 +54,6 @@ const ALLOWED_ORIGINS = new Set([
 app.use(
   cors({
     origin: (origin, cb) => {
-      // allow server-to-server / curl / Postman
       if (!origin) return cb(null, true);
       if (ALLOWED_ORIGINS.has(origin)) return cb(null, true);
       return cb(new Error(`CORS blocked for origin: ${origin}`));
@@ -66,7 +68,7 @@ app.use(
  *  S3 (Cloudflare R2)
  *  --------------------------*/
 const s3 = new S3Client({
-  region: process.env.R2_REGION, // "auto" typically
+  region: process.env.R2_REGION,
   endpoint: process.env.R2_ENDPOINT,
   credentials: {
     accessKeyId: process.env.R2_ACCESS_KEY_ID,
@@ -114,37 +116,49 @@ function uid() {
 }
 
 /**
- * Strength curve that actually darkens:
- * - strength = 100 => baseline
- * - strength > 100 => more dot coverage in midtones/highlights
- * - strength < 100 => lighter
- *
- * coverage = 1 - (1 - darkness)^s, where s=strength/100
+ * Strength curve:
+ * coverage = 1 - (1 - darkness)^s, s=strength/100
  */
 function coverageFromDarkness(darkness01, strength) {
-  const s = clamp(strength / 100, 0.25, 3.0); // allow 25..300 mapped
+  const s = clamp(strength / 100, 0.25, 3.0);
   return 1 - Math.pow(1 - clamp(darkness01, 0, 1), s);
 }
 
 /**
- * Raster halftone renderer:
- * - reads RGBA
- * - averages per cell using alpha-weighted color
- * - draws dots directly into output RGBA buffer
+ * Raster halftone renderer (outputs RGBA PNG)
+ *
+ * IMPORTANT CHANGE:
+ * - We may process at a reduced size (processingMaxWidth),
+ *   but we ALWAYS return a PNG scaled back to original pixel dimensions.
+ * - We ALWAYS tag the PNG with 300 DPI metadata.
  */
-async function makeColorHalftonePng(inputBuffer, { cellSize, maxWidth, dotShape, strength }) {
+async function makeColorHalftonePng(
+  inputBuffer,
+  { cellSize, processingMaxWidth, dotShape, strength, outputDpi }
+) {
   const base = sharp(inputBuffer, { failOn: "none" });
   const meta = await base.metadata();
 
   if (!meta.width || !meta.height) throw new Error("Could not read image dimensions");
 
-  const pixels = meta.width * meta.height;
+  const origW = meta.width;
+  const origH = meta.height;
+
+  const pixels = origW * origH;
   if (pixels > MAX_IMAGE_PIXELS) {
     throw new Error(`Image too large: ${pixels} pixels exceeds limit ${MAX_IMAGE_PIXELS}`);
   }
 
-  const targetW = Math.min(meta.width, maxWidth);
-  const resized = base.resize({ width: targetW, withoutEnlargement: true });
+  // processing size (downscale only)
+  const procW = Math.min(origW, processingMaxWidth);
+  const scale = procW / origW;
+  const procH = Math.max(1, Math.round(origH * scale));
+
+  const resized = base.resize({
+    width: procW,
+    height: procH,
+    withoutEnlargement: true
+  });
 
   const rMeta = await resized.metadata();
   const w = rMeta.width;
@@ -161,6 +175,7 @@ async function makeColorHalftonePng(inputBuffer, { cellSize, maxWidth, dotShape,
 
   const out = Buffer.alloc(w * h * 4, 0);
 
+  // alpha-aware SRC-over blend
   function blendPixel(pxIdx, r, g, b, a01) {
     if (a01 <= 0) return;
 
@@ -216,7 +231,7 @@ async function makeColorHalftonePng(inputBuffer, { cellSize, maxWidth, dotShape,
       const g = Math.round(gSum / aSum);
       const b = Math.round(bSum / aSum);
 
-      const aAvg = aSum / count;
+      const aAvg = aSum / count; // 0..255
       const a01 = clamp(aAvg / 255, 0, 1);
 
       const lum = luminance255(r, g, b);
@@ -229,7 +244,6 @@ async function makeColorHalftonePng(inputBuffer, { cellSize, maxWidth, dotShape,
 
       let rx = half * frac;
       let ry = half * frac;
-
       if (dotShape === "ellipse") {
         rx = rx * 1.25;
         ry = ry * 0.85;
@@ -272,20 +286,30 @@ async function makeColorHalftonePng(inputBuffer, { cellSize, maxWidth, dotShape,
           for (let x = minX; x <= maxX; x++) {
             const dx = x + 0.5 - cx;
             const v = dx * dx * invRx2 + dy2;
-            if (v <= 1) {
-              blendPixel(rowBase + x, r, g, b, a01);
-            }
+            if (v <= 1) blendPixel(rowBase + x, r, g, b, a01);
           }
         }
       }
     }
   }
 
-  const png = await sharp(out, { raw: { width: w, height: h, channels: 4 } })
+  // Encode processing-size PNG with DPI
+  let png = await sharp(out, { raw: { width: w, height: h, channels: 4 } })
+    .withMetadata({ density: outputDpi })
     .png({ compressionLevel: 9, adaptiveFiltering: true })
     .toBuffer();
 
-  return { png, width: w, height: h };
+  // If we processed smaller than the original, scale back up to original pixel dimensions.
+  // Nearest keeps halftone dots crisp instead of blurred.
+  if (w !== origW || h !== origH) {
+    png = await sharp(png)
+      .resize(origW, origH, { kernel: sharp.kernel.nearest })
+      .withMetadata({ density: outputDpi })
+      .png({ compressionLevel: 9, adaptiveFiltering: true })
+      .toBuffer();
+  }
+
+  return { png, width: origW, height: origH, processedWidth: w, processedHeight: h };
 }
 
 /** ---------------------------
@@ -349,10 +373,7 @@ const ProcessRequest = z.object({
   cellSize: z.number().int().min(4).max(80).default(10),
   maxWidth: z.number().int().min(256).max(MAX_MAX_WIDTH).default(DEFAULT_MAX_WIDTH),
   dotShape: z.enum(["circle", "square", "ellipse"]).default("circle"),
-  // Only the DTF-aligned label values
-  strength: z.number().int().refine((v) => [100, 150, 200, 250].includes(v), {
-    message: "Strength must be one of: 100, 150, 200, 250"
-  }).default(150)
+  strength: z.number().int().min(50).max(250).default(150)
 });
 
 app.post("/v1/halftone/process", async (req, res) => {
@@ -384,7 +405,6 @@ app.post("/v1/halftone/process", async (req, res) => {
     const obj = await s3.send(
       new GetObjectCommand({ Bucket: process.env.R2_BUCKET, Key: key })
     );
-
     if (!obj.Body) return res.status(404).json(errJson("NOT_FOUND", "Input object not found"));
 
     const inputBuffer = await streamToBuffer(obj.Body);
@@ -431,12 +451,16 @@ app.post("/v1/halftone/process", async (req, res) => {
 
     const t0 = Date.now();
 
-    const { png, width, height } = await makeColorHalftonePng(inputBuffer, {
-      cellSize,
-      maxWidth,
-      dotShape,
-      strength
-    });
+    const { png, width, height, processedWidth, processedHeight } = await makeColorHalftonePng(
+      inputBuffer,
+      {
+        cellSize,
+        processingMaxWidth: maxWidth,
+        dotShape,
+        strength,
+        outputDpi: OUTPUT_DPI
+      }
+    );
 
     const outId = `ht_${Date.now()}_${uid()}`;
     const outputKey = `outputs/${outId}.png`;
@@ -450,19 +474,21 @@ app.post("/v1/halftone/process", async (req, res) => {
       })
     );
 
-    // Force a real download (best UX) via response headers on signed URL:
-    const downloadCmd = new GetObjectCommand({
-      Bucket: process.env.R2_BUCKET,
-      Key: outputKey,
-      ResponseContentType: "image/png",
-      ResponseContentDisposition: `attachment; filename="halftone.png"`
-    });
-
-    const downloadUrl = await getSignedUrl(s3, downloadCmd, { expiresIn: 600 });
+    const downloadUrl = await getSignedUrl(
+      s3,
+      new GetObjectCommand({ Bucket: process.env.R2_BUCKET, Key: outputKey }),
+      { expiresIn: 600 }
+    );
 
     const ms = Date.now() - t0;
 
-    logWithReq(req, "PROCESS OK:", { outputKey, width, height, ms });
+    logWithReq(req, "PROCESS OK:", {
+      outputKey,
+      original: { width, height },
+      processed: { processedWidth, processedHeight },
+      dpi: OUTPUT_DPI,
+      ms
+    });
 
     return res.json({
       ok: true,
@@ -470,6 +496,13 @@ app.post("/v1/halftone/process", async (req, res) => {
       outputKey,
       format: "png",
       transparent: true,
+      dpi: OUTPUT_DPI,
+      // output dimensions are ALWAYS original
+      width,
+      height,
+      // include processing dims for your logs/diagnostics if needed
+      processedWidth,
+      processedHeight,
       params: { cellSize, maxWidth, dotShape, strength },
       downloadUrl,
       ms

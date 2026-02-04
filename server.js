@@ -39,9 +39,6 @@ const MAX_IMAGE_PIXELS = Number(process.env.MAX_IMAGE_PIXELS || 60_000_000); // 
 const DEFAULT_MAX_WIDTH = Number(process.env.DEFAULT_MAX_WIDTH || 3600);
 const MAX_MAX_WIDTH = Number(process.env.MAX_MAX_WIDTH || 4000);
 
-// REQUIRED: force output DPI
-const OUTPUT_DPI = Number(process.env.OUTPUT_DPI || 300);
-
 const ALLOWED_ORIGINS = new Set([
   "https://moretranz-halftone.pages.dev",
   "https://moretranz.com",
@@ -54,6 +51,7 @@ const ALLOWED_ORIGINS = new Set([
 app.use(
   cors({
     origin: (origin, cb) => {
+      // allow server-to-server / curl / Postman
       if (!origin) return cb(null, true);
       if (ALLOWED_ORIGINS.has(origin)) return cb(null, true);
       return cb(new Error(`CORS blocked for origin: ${origin}`));
@@ -116,8 +114,8 @@ function uid() {
 }
 
 /**
- * Strength curve:
- * coverage = 1 - (1 - darkness)^s, s=strength/100
+ * Strength curve that darkens:
+ * coverage = 1 - (1 - darkness)^s, where s=strength/100
  */
 function coverageFromDarkness(darkness01, strength) {
   const s = clamp(strength / 100, 0.25, 3.0);
@@ -125,40 +123,24 @@ function coverageFromDarkness(darkness01, strength) {
 }
 
 /**
- * Raster halftone renderer (outputs RGBA PNG)
- *
- * IMPORTANT CHANGE:
- * - We may process at a reduced size (processingMaxWidth),
- *   but we ALWAYS return a PNG scaled back to original pixel dimensions.
- * - We ALWAYS tag the PNG with 300 DPI metadata.
+ * Raster halftone renderer:
+ * - reads RGBA
+ * - alpha-weighted cell averaging
+ * - draws dots into RGBA buffer
  */
-async function makeColorHalftonePng(
-  inputBuffer,
-  { cellSize, processingMaxWidth, dotShape, strength, outputDpi }
-) {
+async function makeColorHalftonePng(inputBuffer, { cellSize, maxWidth, dotShape, strength }) {
   const base = sharp(inputBuffer, { failOn: "none" });
   const meta = await base.metadata();
 
   if (!meta.width || !meta.height) throw new Error("Could not read image dimensions");
 
-  const origW = meta.width;
-  const origH = meta.height;
-
-  const pixels = origW * origH;
+  const pixels = meta.width * meta.height;
   if (pixels > MAX_IMAGE_PIXELS) {
     throw new Error(`Image too large: ${pixels} pixels exceeds limit ${MAX_IMAGE_PIXELS}`);
   }
 
-  // processing size (downscale only)
-  const procW = Math.min(origW, processingMaxWidth);
-  const scale = procW / origW;
-  const procH = Math.max(1, Math.round(origH * scale));
-
-  const resized = base.resize({
-    width: procW,
-    height: procH,
-    withoutEnlargement: true
-  });
+  const targetW = Math.min(meta.width, maxWidth);
+  const resized = base.resize({ width: targetW, withoutEnlargement: true });
 
   const rMeta = await resized.metadata();
   const w = rMeta.width;
@@ -175,12 +157,11 @@ async function makeColorHalftonePng(
 
   const out = Buffer.alloc(w * h * 4, 0);
 
-  // alpha-aware SRC-over blend
+  // Alpha blend: SRC over
   function blendPixel(pxIdx, r, g, b, a01) {
     if (a01 <= 0) return;
 
     const i = pxIdx * 4;
-
     const pr = out[i];
     const pg = out[i + 1];
     const pb = out[i + 2];
@@ -231,7 +212,7 @@ async function makeColorHalftonePng(
       const g = Math.round(gSum / aSum);
       const b = Math.round(bSum / aSum);
 
-      const aAvg = aSum / count; // 0..255
+      const aAvg = aSum / count;
       const a01 = clamp(aAvg / 255, 0, 1);
 
       const lum = luminance255(r, g, b);
@@ -244,11 +225,10 @@ async function makeColorHalftonePng(
 
       let rx = half * frac;
       let ry = half * frac;
+
       if (dotShape === "ellipse") {
-        rx = rx * 1.25;
-        ry = ry * 0.85;
-        rx = clamp(rx, 0, half * 1.4);
-        ry = clamp(ry, 0, half * 1.2);
+        rx = clamp(rx * 1.25, 0, half * 1.4);
+        ry = clamp(ry * 0.85, 0, half * 1.2);
       }
 
       if (rx < 0.35 || ry < 0.35) continue;
@@ -280,12 +260,12 @@ async function makeColorHalftonePng(
 
         for (let y = minY; y <= maxY; y++) {
           const dy = y + 0.5 - cy;
-          const dy2 = dy * dy * invRy2;
+          const dy2 = (dy * dy) * invRy2;
           const rowBase = y * w;
 
           for (let x = minX; x <= maxX; x++) {
             const dx = x + 0.5 - cx;
-            const v = dx * dx * invRx2 + dy2;
+            const v = (dx * dx) * invRx2 + dy2;
             if (v <= 1) blendPixel(rowBase + x, r, g, b, a01);
           }
         }
@@ -293,23 +273,12 @@ async function makeColorHalftonePng(
     }
   }
 
-  // Encode processing-size PNG with DPI
-  let png = await sharp(out, { raw: { width: w, height: h, channels: 4 } })
-    .withMetadata({ density: outputDpi })
+  const png = await sharp(out, { raw: { width: w, height: h, channels: 4 } })
     .png({ compressionLevel: 9, adaptiveFiltering: true })
+    .withMetadata({ density: 300 }) // keep DPI metadata at 300
     .toBuffer();
 
-  // If we processed smaller than the original, scale back up to original pixel dimensions.
-  // Nearest keeps halftone dots crisp instead of blurred.
-  if (w !== origW || h !== origH) {
-    png = await sharp(png)
-      .resize(origW, origH, { kernel: sharp.kernel.nearest })
-      .withMetadata({ density: outputDpi })
-      .png({ compressionLevel: 9, adaptiveFiltering: true })
-      .toBuffer();
-  }
-
-  return { png, width: origW, height: origH, processedWidth: w, processedHeight: h };
+  return { png, width: w, height: h };
 }
 
 /** ---------------------------
@@ -389,6 +358,7 @@ app.post("/v1/halftone/process", async (req, res) => {
   try {
     logWithReq(req, "PROCESS PARAMS:", { key, cellSize, maxWidth, dotShape, strength });
 
+    // Head check if available
     try {
       const head = await s3.send(
         new HeadObjectCommand({ Bucket: process.env.R2_BUCKET, Key: key })
@@ -405,6 +375,7 @@ app.post("/v1/halftone/process", async (req, res) => {
     const obj = await s3.send(
       new GetObjectCommand({ Bucket: process.env.R2_BUCKET, Key: key })
     );
+
     if (!obj.Body) return res.status(404).json(errJson("NOT_FOUND", "Input object not found"));
 
     const inputBuffer = await streamToBuffer(obj.Body);
@@ -418,6 +389,7 @@ app.post("/v1/halftone/process", async (req, res) => {
         .json(errJson("TOO_LARGE", `File exceeds max upload size (${MAX_UPLOAD_BYTES} bytes)`));
     }
 
+    // Validate image readable
     let meta;
     try {
       meta = await sharp(inputBuffer, { failOn: "none" }).metadata();
@@ -451,16 +423,12 @@ app.post("/v1/halftone/process", async (req, res) => {
 
     const t0 = Date.now();
 
-    const { png, width, height, processedWidth, processedHeight } = await makeColorHalftonePng(
-      inputBuffer,
-      {
-        cellSize,
-        processingMaxWidth: maxWidth,
-        dotShape,
-        strength,
-        outputDpi: OUTPUT_DPI
-      }
-    );
+    const { png, width, height } = await makeColorHalftonePng(inputBuffer, {
+      cellSize,
+      maxWidth,
+      dotShape,
+      strength
+    });
 
     const outId = `ht_${Date.now()}_${uid()}`;
     const outputKey = `outputs/${outId}.png`;
@@ -474,7 +442,8 @@ app.post("/v1/halftone/process", async (req, res) => {
       })
     );
 
-    const downloadUrl = await getSignedUrl(
+    // signed URL still useful for preview
+    const signedPreviewUrl = await getSignedUrl(
       s3,
       new GetObjectCommand({ Bucket: process.env.R2_BUCKET, Key: outputKey }),
       { expiresIn: 600 }
@@ -482,13 +451,12 @@ app.post("/v1/halftone/process", async (req, res) => {
 
     const ms = Date.now() - t0;
 
-    logWithReq(req, "PROCESS OK:", {
-      outputKey,
-      original: { width, height },
-      processed: { processedWidth, processedHeight },
-      dpi: OUTPUT_DPI,
-      ms
-    });
+    const originalName = key.split("/").pop() || "image.png";
+    const safeOriginal = sanitizeFilename(originalName);
+    const baseName = safeOriginal.replace(/\.[^.]+$/, "");
+    const filename = `${baseName}-halftone.png`;
+
+    logWithReq(req, "PROCESS OK:", { outputKey, width, height, ms });
 
     return res.json({
       ok: true,
@@ -496,20 +464,49 @@ app.post("/v1/halftone/process", async (req, res) => {
       outputKey,
       format: "png",
       transparent: true,
-      dpi: OUTPUT_DPI,
-      // output dimensions are ALWAYS original
-      width,
-      height,
-      // include processing dims for your logs/diagnostics if needed
-      processedWidth,
-      processedHeight,
+      filename,
       params: { cellSize, maxWidth, dotShape, strength },
-      downloadUrl,
+      // use this for preview display
+      downloadUrl: signedPreviewUrl,
       ms
     });
   } catch (e) {
     console.error(`[${req._rid}] HALFTONE ERROR:`, e);
     return res.status(500).json(errJson("INTERNAL", "Failed to process halftone"));
+  }
+});
+
+/**
+ * Download proxy route (fixes Shopify download issues)
+ * GET /v1/halftone/download?key=outputs/xxx.png&filename=name.png
+ */
+app.get("/v1/halftone/download", async (req, res) => {
+  try {
+    const key = String(req.query.key || "");
+    let filename = String(req.query.filename || "halftone.png");
+
+    if (!key.startsWith("outputs/")) {
+      return res.status(400).json(errJson("BAD_REQUEST", "Invalid key"));
+    }
+
+    filename = sanitizeFilename(filename);
+    if (!filename.toLowerCase().endsWith(".png")) filename += ".png";
+
+    const obj = await s3.send(
+      new GetObjectCommand({ Bucket: process.env.R2_BUCKET, Key: key })
+    );
+
+    if (!obj.Body) return res.status(404).json(errJson("NOT_FOUND", "Output not found"));
+
+    res.setHeader("Content-Type", "image/png");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    res.setHeader("Cache-Control", "no-store");
+
+    // Stream body to response
+    obj.Body.pipe(res);
+  } catch (e) {
+    console.error(`[download] error`, e);
+    return res.status(500).json(errJson("INTERNAL", "Failed to download output"));
   }
 });
 

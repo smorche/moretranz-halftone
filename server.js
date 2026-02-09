@@ -11,6 +11,7 @@ import {
   HeadObjectCommand
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import { pipeline } from "node:stream/promises";
 
 const app = express();
 app.use(express.json({ limit: "2mb" }));
@@ -51,7 +52,6 @@ const ALLOWED_ORIGINS = new Set([
 app.use(
   cors({
     origin: (origin, cb) => {
-      // allow server-to-server / curl / Postman
       if (!origin) return cb(null, true);
       if (ALLOWED_ORIGINS.has(origin)) return cb(null, true);
       return cb(new Error(`CORS blocked for origin: ${origin}`));
@@ -123,10 +123,7 @@ function coverageFromDarkness(darkness01, strength) {
 }
 
 /**
- * Raster halftone renderer:
- * - reads RGBA
- * - alpha-weighted cell averaging
- * - draws dots into RGBA buffer
+ * Raster halftone renderer
  */
 async function makeColorHalftonePng(inputBuffer, { cellSize, maxWidth, dotShape, strength }) {
   const base = sharp(inputBuffer, { failOn: "none" });
@@ -157,11 +154,11 @@ async function makeColorHalftonePng(inputBuffer, { cellSize, maxWidth, dotShape,
 
   const out = Buffer.alloc(w * h * 4, 0);
 
-  // Alpha blend: SRC over
   function blendPixel(pxIdx, r, g, b, a01) {
     if (a01 <= 0) return;
 
     const i = pxIdx * 4;
+
     const pr = out[i];
     const pg = out[i + 1];
     const pb = out[i + 2];
@@ -260,12 +257,12 @@ async function makeColorHalftonePng(inputBuffer, { cellSize, maxWidth, dotShape,
 
         for (let y = minY; y <= maxY; y++) {
           const dy = y + 0.5 - cy;
-          const dy2 = (dy * dy) * invRy2;
+          const dy2 = dy * dy * invRy2;
           const rowBase = y * w;
 
           for (let x = minX; x <= maxX; x++) {
             const dx = x + 0.5 - cx;
-            const v = (dx * dx) * invRx2 + dy2;
+            const v = dx * dx * invRx2 + dy2;
             if (v <= 1) blendPixel(rowBase + x, r, g, b, a01);
           }
         }
@@ -275,7 +272,7 @@ async function makeColorHalftonePng(inputBuffer, { cellSize, maxWidth, dotShape,
 
   const png = await sharp(out, { raw: { width: w, height: h, channels: 4 } })
     .png({ compressionLevel: 9, adaptiveFiltering: true })
-    .withMetadata({ density: 300 }) // keep DPI metadata at 300
+    .withMetadata({ density: 300 }) // IMPORTANT: embed 300dpi
     .toBuffer();
 
   return { png, width: w, height: h };
@@ -304,9 +301,7 @@ app.post("/v1/halftone/upload-url", async (req, res) => {
   try {
     const parsed = UploadUrlRequest.safeParse(req.body);
     if (!parsed.success) {
-      return res.status(400).json(
-        errJson("BAD_REQUEST", "Invalid request", { issues: parsed.error.flatten() })
-      );
+      return res.status(400).json(errJson("BAD_REQUEST", "Invalid request", { issues: parsed.error.flatten() }));
     }
 
     const { filename, contentType, contentLength } = parsed.data;
@@ -342,15 +337,13 @@ const ProcessRequest = z.object({
   cellSize: z.number().int().min(4).max(80).default(10),
   maxWidth: z.number().int().min(256).max(MAX_MAX_WIDTH).default(DEFAULT_MAX_WIDTH),
   dotShape: z.enum(["circle", "square", "ellipse"]).default("circle"),
-  strength: z.number().int().min(50).max(250).default(150)
+  strength: z.number().int().min(100).max(250).default(150)
 });
 
 app.post("/v1/halftone/process", async (req, res) => {
   const parsed = ProcessRequest.safeParse(req.body);
   if (!parsed.success) {
-    return res.status(400).json(
-      errJson("BAD_REQUEST", "Invalid request", { issues: parsed.error.flatten() })
-    );
+    return res.status(400).json(errJson("BAD_REQUEST", "Invalid request", { issues: parsed.error.flatten() }));
   }
 
   const { key, cellSize, maxWidth, dotShape, strength } = parsed.data;
@@ -358,38 +351,25 @@ app.post("/v1/halftone/process", async (req, res) => {
   try {
     logWithReq(req, "PROCESS PARAMS:", { key, cellSize, maxWidth, dotShape, strength });
 
-    // Head check if available
     try {
-      const head = await s3.send(
-        new HeadObjectCommand({ Bucket: process.env.R2_BUCKET, Key: key })
-      );
+      const head = await s3.send(new HeadObjectCommand({ Bucket: process.env.R2_BUCKET, Key: key }));
       if (typeof head.ContentLength === "number" && head.ContentLength > MAX_UPLOAD_BYTES) {
-        return res
-          .status(413)
-          .json(errJson("TOO_LARGE", `File exceeds max upload size (${MAX_UPLOAD_BYTES} bytes)`));
+        return res.status(413).json(errJson("TOO_LARGE", `File exceeds max upload size (${MAX_UPLOAD_BYTES} bytes)`));
       }
     } catch (e) {
       logWithReq(req, "HeadObject warning:", String(e?.name || e));
     }
 
-    const obj = await s3.send(
-      new GetObjectCommand({ Bucket: process.env.R2_BUCKET, Key: key })
-    );
-
+    const obj = await s3.send(new GetObjectCommand({ Bucket: process.env.R2_BUCKET, Key: key }));
     if (!obj.Body) return res.status(404).json(errJson("NOT_FOUND", "Input object not found"));
 
     const inputBuffer = await streamToBuffer(obj.Body);
 
-    if (inputBuffer.length <= 0) {
-      return res.status(400).json(errJson("BAD_IMAGE", "Uploaded file is empty"));
-    }
+    if (inputBuffer.length <= 0) return res.status(400).json(errJson("BAD_IMAGE", "Uploaded file is empty"));
     if (inputBuffer.length > MAX_UPLOAD_BYTES) {
-      return res
-        .status(413)
-        .json(errJson("TOO_LARGE", `File exceeds max upload size (${MAX_UPLOAD_BYTES} bytes)`));
+      return res.status(413).json(errJson("TOO_LARGE", `File exceeds max upload size (${MAX_UPLOAD_BYTES} bytes)`));
     }
 
-    // Validate image readable
     let meta;
     try {
       meta = await sharp(inputBuffer, { failOn: "none" }).metadata();
@@ -399,26 +379,18 @@ app.post("/v1/halftone/process", async (req, res) => {
     }
 
     if (!meta.format || !["png", "jpeg", "webp"].includes(meta.format)) {
-      return res.status(400).json(
-        errJson("BAD_IMAGE", "Unsupported image format (only PNG, JPG, WEBP)", {
-          format: meta.format || null
-        })
-      );
+      return res.status(400).json(errJson("BAD_IMAGE", "Unsupported image format (only PNG, JPG, WEBP)", { format: meta.format || null }));
     }
 
-    if (!meta.width || !meta.height) {
-      return res.status(400).json(errJson("BAD_IMAGE", "Could not read image dimensions"));
-    }
+    if (!meta.width || !meta.height) return res.status(400).json(errJson("BAD_IMAGE", "Could not read image dimensions"));
 
     const totalPixels = meta.width * meta.height;
     if (totalPixels > MAX_IMAGE_PIXELS) {
-      return res.status(413).json(
-        errJson("TOO_LARGE", `Image resolution too large (${totalPixels} pixels)`, {
-          width: meta.width,
-          height: meta.height,
-          maxPixels: MAX_IMAGE_PIXELS
-        })
-      );
+      return res.status(413).json(errJson("TOO_LARGE", `Image resolution too large (${totalPixels} pixels)`, {
+        width: meta.width,
+        height: meta.height,
+        maxPixels: MAX_IMAGE_PIXELS
+      }));
     }
 
     const t0 = Date.now();
@@ -433,28 +405,21 @@ app.post("/v1/halftone/process", async (req, res) => {
     const outId = `ht_${Date.now()}_${uid()}`;
     const outputKey = `outputs/${outId}.png`;
 
-    await s3.send(
-      new PutObjectCommand({
-        Bucket: process.env.R2_BUCKET,
-        Key: outputKey,
-        Body: png,
-        ContentType: "image/png"
-      })
-    );
+    await s3.send(new PutObjectCommand({
+      Bucket: process.env.R2_BUCKET,
+      Key: outputKey,
+      Body: png,
+      ContentType: "image/png"
+    }));
 
-    // signed URL still useful for preview
-    const signedPreviewUrl = await getSignedUrl(
+    // Keep signed URL for preview (works in <img>)
+    const previewUrl = await getSignedUrl(
       s3,
       new GetObjectCommand({ Bucket: process.env.R2_BUCKET, Key: outputKey }),
       { expiresIn: 600 }
     );
 
     const ms = Date.now() - t0;
-
-    const originalName = key.split("/").pop() || "image.png";
-    const safeOriginal = sanitizeFilename(originalName);
-    const baseName = safeOriginal.replace(/\.[^.]+$/, "");
-    const filename = `${baseName}-halftone.png`;
 
     logWithReq(req, "PROCESS OK:", { outputKey, width, height, ms });
 
@@ -464,10 +429,8 @@ app.post("/v1/halftone/process", async (req, res) => {
       outputKey,
       format: "png",
       transparent: true,
-      filename,
       params: { cellSize, maxWidth, dotShape, strength },
-      // use this for preview display
-      downloadUrl: signedPreviewUrl,
+      previewUrl, // use for <img>
       ms
     });
   } catch (e) {
@@ -477,35 +440,32 @@ app.post("/v1/halftone/process", async (req, res) => {
 });
 
 /**
- * Download proxy route (fixes Shopify download issues)
- * GET /v1/halftone/download?key=outputs/xxx.png&filename=name.png
+ * NEW: Download via API to avoid browser CORS issues with R2 signed URLs.
+ * GET /v1/halftone/download?key=outputs/xxx.png&filename=MyFile%20halftone.png
  */
 app.get("/v1/halftone/download", async (req, res) => {
   try {
     const key = String(req.query.key || "");
-    let filename = String(req.query.filename || "halftone.png");
+    const filename = sanitizeFilename(String(req.query.filename || "halftone.png"));
 
-    if (!key.startsWith("outputs/")) {
-      return res.status(400).json(errJson("BAD_REQUEST", "Invalid key"));
+    // Safety: only allow outputs
+    if (!key.startsWith("outputs/") || !key.endsWith(".png")) {
+      return res.status(400).json(errJson("BAD_REQUEST", "Invalid download key"));
     }
 
-    filename = sanitizeFilename(filename);
-    if (!filename.toLowerCase().endsWith(".png")) filename += ".png";
-
-    const obj = await s3.send(
-      new GetObjectCommand({ Bucket: process.env.R2_BUCKET, Key: key })
-    );
-
+    // Stream from R2 to client as attachment
+    const obj = await s3.send(new GetObjectCommand({ Bucket: process.env.R2_BUCKET, Key: key }));
     if (!obj.Body) return res.status(404).json(errJson("NOT_FOUND", "Output not found"));
 
     res.setHeader("Content-Type", "image/png");
     res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
     res.setHeader("Cache-Control", "no-store");
 
-    // Stream body to response
-    obj.Body.pipe(res);
+    await pipeline(obj.Body, res);
   } catch (e) {
-    console.error(`[download] error`, e);
+    console.error(`[${req._rid}] DOWNLOAD ERROR:`, e);
+    // If headers already sent, just end
+    if (res.headersSent) return res.end();
     return res.status(500).json(errJson("INTERNAL", "Failed to download output"));
   }
 });
